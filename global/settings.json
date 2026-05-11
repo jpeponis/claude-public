@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Edit",
+      "Glob",
+      "Grep",
+      "Read",
+      "WebFetch",
+      "WebSearch",
+      "Write"
+    ],
+    "defaultMode": "dontAsk"
+  },
+  "model": "opus",
+  "statusLine": {
+    "type": "command",
+    "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:/Users/{{USERNAME}}/.claude/statusline-command.ps1\""
+  },
+  "enabledPlugins": {
+    "github@claude-plugins-official": true
+  },
+  "effortLevel": "high",
+  "promptSuggestionEnabled": false,
+  "autoUpdatesChannel": "latest",
+  "skipDangerousModePermissionPrompt": true,
+  "preferredNotifChannel": "notifications_disabled",
+  "agentPushNotifEnabled": false
+}

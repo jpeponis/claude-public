@@ -1,0 +1,99 @@
+# Claude Code Portable Configuration
+
+A template for syncing Claude Code settings, agents, and slash commands across multiple Windows machines. This is the public version of a personal setup — feel free to fork, adapt, and add your own skills and agents.
+
+## Repository Structure
+
+- `global/` — Maps to `%USERPROFILE%\.claude\` (global Claude Code config)
+  - `settings.json` — Global settings and permissions
+  - `agents/` — Agent definitions (e.g., file-manager)
+  - `commands/` — Slash commands (e.g., sync-config)
+- `project-desktop/` — Maps to `%USERPROFILE%\Desktop\` (project-level config)
+  - `CLAUDE.md` — Project instructions
+  - `.claude/settings.local.json` — Project-local settings
+- `powershell/` — Maps to `Documents\WindowsPowerShell\`
+  - `Microsoft.PowerShell_profile.ps1` — Profile with claude-sp, claude-api, etc.
+- `collect.ps1` — Gather local config into repo (parameterizes username)
+- `deploy.ps1` — Deploy repo config to local machine (inserts local username)
+- `System Prompt.txt` — Custom system prompt (repo-native, not collected/deployed)
+- `claude-api.ps1` — Standalone API-mode launcher (repo-native)
+
+## How Path Portability Works
+
+Settings files contain hardcoded Windows paths like `C:\Users\<name>\...`. Since usernames differ across machines, the scripts replace the username with a `{{USERNAME}}` placeholder in the repo, and substitute the local machine's `%USERNAME%` when deploying.
+
+## First-Time Setup on a New Machine
+
+### Prerequisites
+- Git installed and configured with GitHub credentials
+- Node.js 22+ (for Claude Code)
+- Claude Code installed
+
+### Steps
+
+1. Clone this repo (or your fork of it):
+   ```powershell
+   git clone https://github.com/jpeponis/claude-public.git "$env:USERPROFILE\Desktop\claude-config"
+   ```
+
+   If you plan to use this as your own ongoing sync repo, fork it first (or create your own empty repo) and clone that instead. Otherwise `sync-config push` will fail because you won't have write access to the upstream.
+
+2. Create a GitHub Personal Access Token (only needed if you want the GitHub MCP plugin):
+   - Go to https://github.com/settings/tokens?type=beta (Fine-grained tokens)
+   - Click "Generate new token"
+   - Name it something like "Claude Code MCP"
+   - Set expiration (recommend 90 days)
+   - Under "Repository access", select "All repositories" (or specific ones)
+   - Under "Permissions", grant:
+     - **Contents**: Read and write
+     - **Issues**: Read and write
+     - **Pull requests**: Read and write
+     - **Metadata**: Read-only (auto-selected)
+   - Click "Generate token" and copy it
+
+3. Set the token as a persistent environment variable:
+   ```powershell
+   [Environment]::SetEnvironmentVariable("GITHUB_PERSONAL_ACCESS_TOKEN", "<paste-token-here>", "User")
+   ```
+   Then **close and reopen your terminal** for it to take effect.
+
+4. Deploy configuration:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Desktop\claude-config\deploy.ps1"
+   ```
+
+5. Restart Claude Code and verify:
+   - Settings load correctly (model, permissions)
+   - The `/sync-config` slash command appears
+   - The file-manager agent is available
+   - The GitHub MCP plugin connects (try asking Claude a GitHub-related question)
+
+## Ongoing Usage
+
+### From within Claude Code
+Use the `/sync-config` slash command:
+- `/sync-config pull` — Pull latest config from repo and deploy locally
+- `/sync-config push` — Collect local config, commit, and push to repo
+
+### From PowerShell
+
+**Push local changes to repo:**
+```powershell
+cd "$env:USERPROFILE\Desktop\claude-config"
+powershell -ExecutionPolicy Bypass -File collect.ps1
+git add -A && git commit -m "Update config" && git push
+```
+
+**Pull changes from repo:**
+```powershell
+cd "$env:USERPROFILE\Desktop\claude-config"
+git pull
+powershell -ExecutionPolicy Bypass -File deploy.ps1
+```
+
+## Adding New Files to Sync
+
+To add a new file (e.g., a new agent or slash command):
+1. Edit `collect.ps1` and `deploy.ps1` — add a new entry to the `$mappings` array
+2. Run `collect.ps1` to bring the file into the repo
+3. Commit and push
