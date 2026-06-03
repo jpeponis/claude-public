@@ -20,7 +20,7 @@
 - **MCP Tool Search** is always on (`ENABLE_TOOL_SEARCH=true` user env var). Lazy-loads MCP tool definitions to save context.
 - Use `/mcp` in-session to toggle servers on/off without restarting.
 - Use `@` to browse available MCP resources in the prompt.
-- Only GitHub MCP is currently installed; marketplace plugins (Playwright, Slack, Stripe, etc.) are available but not enabled.
+- Run `claude mcp list` to see currently connected servers. Their tool definitions are lazy-loaded via Tool Search, so they don't consume active context until used.
 - Subagents inherit the parent session's MCP tools. Background subagents cannot use MCP tools.
 - To add new servers: `claude mcp add --transport http <name> <url>` (run outside Claude Code session).
 

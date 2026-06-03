@@ -10,7 +10,7 @@
       "WebSearch",
       "Write"
     ],
-    "defaultMode": "dontAsk"
+    "defaultMode": "auto"
   },
   "model": "opus",
   "statusLine": {
@@ -22,8 +22,11 @@
   },
   "effortLevel": "high",
   "promptSuggestionEnabled": false,
+  "awaySummaryEnabled": false,
   "autoUpdatesChannel": "latest",
   "skipDangerousModePermissionPrompt": true,
+  "verbose": false,
   "preferredNotifChannel": "notifications_disabled",
-  "agentPushNotifEnabled": false
+  "agentPushNotifEnabled": false,
+  "skipAutoPermissionPrompt": true
 }

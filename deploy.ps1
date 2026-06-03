@@ -145,5 +145,16 @@ if (-not ([Environment]::GetEnvironmentVariable('ENABLE_TOOL_SEARCH', 'User'))) 
     Write-Host "Set ENABLE_TOOL_SEARCH=true (User-level)." -ForegroundColor Green
 }
 
+# --- Windows Terminal: ensure Shift+Enter sends a newline (repo-native injection) ---
+$wtScript = Join-Path $repoRoot "apply-terminal-keybinding.ps1"
+if (Test-Path $wtScript) {
+    Write-Host ""
+    try {
+        & $wtScript
+    } catch {
+        Write-Host "[WARN] apply-terminal-keybinding.ps1 failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 Write-Host ""
 Write-Host "Restart Claude Code for changes to take effect." -ForegroundColor Cyan

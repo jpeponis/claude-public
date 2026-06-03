@@ -17,6 +17,8 @@ A template for syncing Claude Code settings, agents, and slash commands across m
 - `deploy.ps1` — Deploy repo config to local machine (inserts local username)
 - `System Prompt.txt` — Custom system prompt (repo-native, not collected/deployed)
 - `claude-api.ps1` — Standalone API-mode launcher (repo-native)
+- `apply-terminal-keybinding.ps1` — Repo-native; injects a Shift+Enter→newline action into the
+  local Windows Terminal `settings.json`. Run automatically at the end of `deploy.ps1`.
 
 ## How Path Portability Works
 
@@ -90,6 +92,17 @@ cd "$env:USERPROFILE\Desktop\claude-config"
 git pull
 powershell -ExecutionPolicy Bypass -File deploy.ps1
 ```
+
+## Windows Terminal Shift+Enter
+
+`apply-terminal-keybinding.ps1` makes **Shift+Enter** insert a newline (instead of submitting)
+in Claude Code under Windows Terminal. It does *not* sync the whole Terminal `settings.json`
+(that file holds machine-specific profile GUIDs and lives under a package path that varies per
+machine). Instead it surgically adds two idempotent blocks to whatever local `settings.json`
+exists — a `sendInput` action emitting `\u001b\r` (ESC+CR, which Claude Code reads as a newline)
+and a `shift+enter` keybinding mapped to it. Re-running is a no-op once present; the original
+file is backed up to `.backups\terminal\` before any change. `deploy.ps1` invokes it
+automatically, so `/sync-config pull` applies it on every machine.
 
 ## Adding New Files to Sync
 
