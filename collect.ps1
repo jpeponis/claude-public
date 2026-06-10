@@ -19,10 +19,11 @@ $fileMappings = @(
     @{ Source = "$env:USERPROFILE\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1"; Dest = "powershell\Microsoft.PowerShell_profile.ps1" }
 )
 
-# --- Directory mappings (all *.md files synced as a unit) ---
+# --- Directory mappings (each Filter synced as a unit) ---
 $dirMappings = @(
     @{ SourceDir = "$claudeHome\commands"; DestDir = "global\commands"; Filter = "*.md" }
     @{ SourceDir = "$claudeHome\agents";   DestDir = "global\agents";  Filter = "*.md" }
+    @{ SourceDir = "$desktopDir\.claude\workflows"; DestDir = "project-desktop\.claude\workflows"; Filter = "*.js" }
 )
 
 $collected = 0
