@@ -1,6 +1,6 @@
 # Claude Code Portable Configuration
 
-A template for syncing Claude Code settings, agents, and slash commands across multiple Windows machines. This is the public version of a personal setup — feel free to fork, adapt, and add your own skills and agents.
+A template for syncing Claude Code settings, agents, slash commands, and dynamic workflows across multiple Windows machines. This is the public version of a personal setup — feel free to fork, adapt, and add your own skills, agents, and workflows.
 
 ## Repository Structure
 
@@ -11,6 +11,7 @@ A template for syncing Claude Code settings, agents, and slash commands across m
 - `project-desktop/` — Maps to `%USERPROFILE%\Desktop\` (project-level config)
   - `CLAUDE.md` — Project instructions
   - `.claude/settings.local.json` — Project-local settings
+  - `.claude/workflows/` — Dynamic workflow scripts (`*.js`, e.g. deep-research-tiered)
 - `powershell/` — Maps to `Documents\WindowsPowerShell\`
   - `Microsoft.PowerShell_profile.ps1` — Profile with claude-sp, claude-api, etc.
 - `collect.ps1` — Gather local config into repo (parameterizes username)
@@ -104,9 +105,16 @@ and a `shift+enter` keybinding mapped to it. Re-running is a no-op once present;
 file is backed up to `.backups\terminal\` before any change. `deploy.ps1` invokes it
 automatically, so `/sync-config pull` applies it on every machine.
 
+## Dynamic Workflows
+
+[Dynamic workflows](https://docs.claude.com/en/docs/claude-code/) are `*.js` scripts under `%USERPROFILE%\Desktop\.claude\workflows\` that orchestrate multiple subagents deterministically. They are synced as a unit (every `*.js` file in that folder), the same way agents and slash commands are. The included `deep-research-tiered.js` is a sample: it runs the search/fetch/verify fan-out on a cheap worker model (Sonnet) and reserves the current session model for question decomposition and final synthesis.
+
+Because workflow scripts hold no machine-specific paths, they are copied verbatim (the username placeholder pass is a no-op on them).
+
 ## Adding New Files to Sync
 
-To add a new file (e.g., a new agent or slash command):
-1. Edit `collect.ps1` and `deploy.ps1` — add a new entry to the `$mappings` array
-2. Run `collect.ps1` to bring the file into the repo
-3. Commit and push
+To add a new **individual file**: edit `collect.ps1` and `deploy.ps1` and add an entry to the `$fileMappings` array.
+
+To add a new **folder of files** (like agents, commands, or workflows): add an entry to the `$dirMappings` array with a `Filter` (e.g. `*.md` or `*.js`). All matching files in the folder are synced as a unit, and files deleted locally are removed from the repo on the next collect (and vice-versa on deploy, with a backup first).
+
+Then run `collect.ps1` to bring the file(s) into the repo, and commit and push.
