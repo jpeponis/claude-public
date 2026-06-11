@@ -6,7 +6,7 @@ A template for syncing Claude Code settings, agents, slash commands, and dynamic
 
 - `global/` — Maps to `%USERPROFILE%\.claude\` (global Claude Code config)
   - `settings.json` — Global settings and permissions
-  - `agents/` — Agent definitions (e.g., file-manager)
+  - `agents/` — Agent definitions (e.g., file-manager, research-worker — minimal-context worker used by deep-research-tiered)
   - `commands/` — Slash commands (e.g., sync-config)
 - `project-desktop/` — Maps to `%USERPROFILE%\Desktop\` (project-level config)
   - `CLAUDE.md` — Project instructions
@@ -107,7 +107,7 @@ automatically, so `/sync-config pull` applies it on every machine.
 
 ## Dynamic Workflows
 
-[Dynamic workflows](https://docs.claude.com/en/docs/claude-code/) are `*.js` scripts under `%USERPROFILE%\Desktop\.claude\workflows\` that orchestrate multiple subagents deterministically. They are synced as a unit (every `*.js` file in that folder), the same way agents and slash commands are. The included `deep-research-tiered.js` is a sample: it runs the search/fetch/verify fan-out on a cheap worker model (Sonnet) and reserves the current session model for question decomposition and final synthesis.
+[Dynamic workflows](https://docs.claude.com/en/docs/claude-code/) are `*.js` scripts under `%USERPROFILE%\Desktop\.claude\workflows\` that orchestrate multiple subagents deterministically. They are synced as a unit (every `*.js` file in that folder), the same way agents and slash commands are. The included `deep-research-tiered.js` is a sample: the session model decomposes the question into search angles and key assertions, worker-model agents fan out to search and fetch sources, each extracted claim gets a fast Haiku scan that escalates doubtful or key-assertion claims to two Sonnet adversarial-lens votes, and the session model synthesizes a cited report and runs a completeness critique against the key assertions. Every spawned agent uses the lightweight `research-worker` agent definition (`global/agents/research-worker.md`) — a barebones system prompt with no MCP tools or skills.
 
 Because workflow scripts hold no machine-specific paths, they are copied verbatim (the username placeholder pass is a no-op on them).
 
