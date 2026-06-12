@@ -24,6 +24,13 @@
 - Subagents inherit the parent session's MCP tools. Background subagents cannot use MCP tools.
 - To add new servers: `claude mcp add --transport http <name> <url>` (run outside Claude Code session).
 
+## Workflows (Dynamic Multi-Agent Orchestration)
+- `enableWorkflows` is **false by default** in global settings.json to keep the Workflow tool's large schema out of context. Workflows are NOT one of the 19 Tool-Search-deferred built-ins, so this setting is the only lever for it.
+- The setting **hot-reloads from settings.json on every request** — no restart needed. Both the Workflow tool schema and the call gate track the live value. The gate is checked only at launch time (a running background workflow is unaffected by later edits).
+- **On-demand enable (do this automatically):** When a task needs the Workflow tool (e.g. `/deep-research-tiered`, `/deep-research`, or any `.claude/workflows/*.js` script), FIRST set `"enableWorkflows": true` in `C:\Users\{{USERNAME}}\.claude\settings.json`, THEN call the Workflow tool on the next step (the schema appears in the rebuilt request).
+- **Restore lean default:** Once the workflow has launched, set `"enableWorkflows": false` again so future sessions stay lean.
+- **Alternative (no in-session edits):** launch a workflow-enabled session with `claude --settings "C:\Users\{{USERNAME}}\.claude\workflows-on.json"` (that file contains `{"enableWorkflows": true}` and overrides only that key).
+
 ## Bash ↔ PowerShell Escaping
 - Never pass complex PowerShell (containing `$variables`, `$null`, nested quotes) inline via `powershell.exe -Command "..."` from bash. Both shells fight over `$`.
 - Instead: write a temp `.ps1` file, run with `powershell.exe -ExecutionPolicy Bypass -File <path>`, then delete it.
