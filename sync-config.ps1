@@ -18,6 +18,11 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+# Fail fast instead of hanging on an interactive credential/TTY prompt when run
+# non-interactively (e.g. from Claude Code). Credentials still come from Git
+# Credential Manager; this only disables the interactive fallback.
+$env:GIT_TERMINAL_PROMPT = "0"
+
 # --- Validate repo state ---
 if (-not (Test-Path (Join-Path $repoRoot ".git"))) {
     Write-Host "ERROR: $repoRoot is not a git repository." -ForegroundColor Red
