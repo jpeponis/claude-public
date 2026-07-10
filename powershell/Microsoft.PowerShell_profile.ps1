@@ -1,3 +1,11 @@
+# --- Encrypted secret store: load GitHub token for the GitHub MCP plugin ---
+# The plugin's .mcp.json sends "Authorization: Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}",
+# expanded from the environment when Claude Code launches. Load it from the DPAPI
+# store (~/.claude/.github-token.enc, created by Set-Secret.ps1) if not already set.
+if (-not $env:GITHUB_PERSONAL_ACCESS_TOKEN -and (Test-Path "$env:USERPROFILE\.claude\.github-token.enc")) {
+    $env:GITHUB_PERSONAL_ACCESS_TOKEN = & "$env:USERPROFILE\Desktop\claude-config\Get-Secret.ps1" -Name github-token
+}
+
 function claude-sp {
     claude --system-prompt-file "$env:USERPROFILE\Desktop\claude-config\System Prompt.txt" @args
 }
