@@ -35,26 +35,71 @@ function claude-api-spsp {
 }
 
 function codex-sp {
-    [CmdletBinding()]
-    param(
-        [Parameter(ValueFromRemainingArguments = $true)]
-        [string[]]$CodexArgs
-    )
+    $codexArgs = @($args)
 
     $desktopPath = [Environment]::GetFolderPath('Desktop')
     $promptPath = Join-Path $desktopPath 'claude-config\System Prompt.txt'
 
-    if (-not (Test-Path -LiteralPath $promptPath)) {
+    if (-not (Test-Path -LiteralPath $promptPath -PathType Leaf)) {
         Write-Error "Prompt file not found: $promptPath"
         return
     }
 
-    $developerInstructions = Get-Content -LiteralPath $promptPath -Raw
+    $promptContents = Get-Content -LiteralPath $promptPath -Raw
 
-    if ([string]::IsNullOrWhiteSpace($developerInstructions)) {
+    if ([string]::IsNullOrWhiteSpace($promptContents)) {
         Write-Error "Prompt file is empty: $promptPath"
         return
     }
 
-    & codex --config "developer_instructions=$developerInstructions" @CodexArgs
+    # Encode the Windows path as a TOML string for Codex's --config flag.
+    $tomlPath = $promptPath.Replace('\', '\\').Replace('"', '\"')
+    $configOverride = 'model_instructions_file="' + $tomlPath + '"'
+
+    # Codex 0.144 rejects root --strict-config for administrative/debug
+    # subcommands. Apply it to interactive, agent, and session commands.
+    $rootOptionsWithValue = @(
+        '-c', '--config', '--enable', '--disable', '--remote',
+        '--remote-auth-token-env', '-i', '--image', '-m', '--model',
+        '--local-provider', '-p', '--profile', '-s', '--sandbox', '-C',
+        '--cd', '--add-dir', '-a', '--ask-for-approval'
+    )
+    $knownSubcommands = @(
+        'exec', 'e', 'review', 'login', 'logout', 'mcp', 'plugin', 'mcp-server',
+        'app-server', 'remote-control', 'app', 'completion', 'update',
+        'doctor', 'sandbox', 'debug', 'apply', 'a', 'resume', 'archive',
+        'delete', 'unarchive', 'fork', 'cloud', 'cloud-tasks', 'exec-server',
+        'features', 'help'
+    )
+    $strictConfigSubcommands = @(
+        'exec', 'e', 'review', 'mcp-server', 'exec-server', 'resume', 'archive',
+        'delete', 'unarchive', 'fork', 'doctor'
+    )
+
+    $selectedSubcommand = $null
+    for ($i = 0; $i -lt $codexArgs.Count; $i++) {
+        $argument = [string]$codexArgs[$i]
+        if ($argument -eq '--') {
+            break
+        }
+        if ($rootOptionsWithValue -contains $argument) {
+            $i++
+            continue
+        }
+        if ($argument.StartsWith('-')) {
+            continue
+        }
+        if ($knownSubcommands -contains $argument) {
+            $selectedSubcommand = $argument
+        }
+        break
+    }
+
+    $codexLaunchArgs = @('--config', $configOverride)
+    if ($null -eq $selectedSubcommand -or $strictConfigSubcommands -contains $selectedSubcommand) {
+        $codexLaunchArgs = @('--strict-config') + $codexLaunchArgs
+    }
+    $codexLaunchArgs += $codexArgs
+
+    & codex @codexLaunchArgs
 }

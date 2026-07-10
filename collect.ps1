@@ -10,7 +10,8 @@ $desktopDir = Join-Path $env:USERPROFILE "Desktop"
 
 # --- Individual file mappings ---
 # NOTE: "System Prompt.txt" and "claude-api.ps1" live directly in the repo root — no collect needed.
-# NOTE: .api-key.enc is NEVER collected (sensitive, DPAPI-encrypted, machine-specific).
+# NOTE: ~/.claude/.*.enc secrets (api-key, github-token, ...) are NEVER collected
+#       (sensitive, DPAPI-encrypted, machine-specific). The allowlist below excludes them structurally.
 $fileMappings = @(
     @{ Source = "$claudeHome\settings.json";              Dest = "global\settings.json" }
     @{ Source = "$claudeHome\statusline-command.ps1";     Dest = "global\statusline-command.ps1" }
