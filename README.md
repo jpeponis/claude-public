@@ -16,6 +16,9 @@ A template for syncing Claude Code settings, agents, slash commands, and dynamic
   - `Microsoft.PowerShell_profile.ps1` — Profile with claude-sp, claude-api, etc.
 - `collect.ps1` — Gather local config into repo (parameterizes username)
 - `deploy.ps1` — Deploy repo config to local machine (inserts local username)
+- `Set-Secret.ps1` / `Get-Secret.ps1` — Per-machine encrypted secret store (repo-native).
+  Secrets are DPAPI-encrypted to `%USERPROFILE%\.claude\.<name>.enc` (current user, current
+  machine only) and are never collected or deployed; `deploy.ps1` warns about missing ones.
 - `System Prompt.txt` — Custom system prompt (repo-native, not collected/deployed)
 - `claude-api.ps1` — Standalone API-mode launcher (repo-native)
 - `apply-terminal-keybinding.ps1` — Repo-native; injects a Shift+Enter→newline action into the

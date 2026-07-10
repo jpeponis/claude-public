@@ -9,8 +9,8 @@ $desktopDir = Join-Path $env:USERPROFILE "Desktop"
 
 # --- Individual file mappings ---
 # NOTE: "System Prompt.txt" and "claude-api.ps1" live directly in the repo root — no deploy needed.
-# NOTE: .api-key.enc is NEVER deployed (sensitive, DPAPI-encrypted, machine-specific).
-#       If missing locally, a warning is shown below.
+# NOTE: ~/.claude/.*.enc secrets (api-key, github-token, ...) are NEVER deployed
+#       (sensitive, DPAPI-encrypted, machine-specific). Missing ones are warned about below.
 $fileMappings = @(
     @{ Source = "global\settings.json";                     Dest = "$claudeHome\settings.json" }
     @{ Source = "global\statusline-command.ps1";            Dest = "$claudeHome\statusline-command.ps1" }
@@ -121,22 +121,22 @@ foreach ($dir in $dirMappings) {
 Write-Host ""
 Write-Host "Deployed $deployed files, skipped $skipped, deleted $deleted." -ForegroundColor Cyan
 
-# --- Reminders ---
-if (-not $env:GITHUB_PERSONAL_ACCESS_TOKEN) {
-    Write-Host ""
-    Write-Host "NOTE: GITHUB_PERSONAL_ACCESS_TOKEN environment variable is not set." -ForegroundColor Yellow
-    Write-Host "The GitHub MCP server will not work until you set it:" -ForegroundColor Yellow
-    Write-Host '  [Environment]::SetEnvironmentVariable("GITHUB_PERSONAL_ACCESS_TOKEN", "<your-token>", "User")' -ForegroundColor White
-    Write-Host "Then restart your terminal." -ForegroundColor Yellow
-}
-
-$apiKeyPath = Join-Path $claudeHome ".api-key.enc"
-if (-not (Test-Path $apiKeyPath)) {
-    Write-Host ""
-    Write-Host "NOTE: Encrypted API key not found at $apiKeyPath" -ForegroundColor Yellow
-    Write-Host "API-mode functions (claude-api, claude-api-sp, claude-api-spsp) will not work." -ForegroundColor Yellow
-    Write-Host "To set up: encrypt your Anthropic API key with DPAPI and save to that path." -ForegroundColor Yellow
-    Write-Host "Example: `$secure = Read-Host 'API key' -AsSecureString; ConvertFrom-SecureString `$secure | Set-Content `$apiKeyPath" -ForegroundColor White
+# --- Reminders: encrypted secret store (DPAPI, per-user/per-machine; intentionally NOT synced) ---
+# These .enc files cannot be carried between machines; each machine re-encrypts its own
+# secrets locally with Set-Secret.ps1. Warn for any that are missing on this machine.
+$secretChecks = @(
+    @{ Name = 'api-key';      Purpose = 'Anthropic API mode (claude-api, -sp, -spsp)' }
+    @{ Name = 'github-token'; Purpose = 'GitHub MCP server (loaded into env by the PowerShell profile)' }
+)
+foreach ($s in $secretChecks) {
+    $encPath = Join-Path $claudeHome ".$($s.Name).enc"
+    if (-not (Test-Path $encPath)) {
+        Write-Host ""
+        Write-Host "NOTE: encrypted secret '$($s.Name)' not found at $encPath" -ForegroundColor Yellow
+        Write-Host "  Needed for: $($s.Purpose)" -ForegroundColor Yellow
+        Write-Host "  Create it on this machine (DPAPI, current user only):" -ForegroundColor Yellow
+        Write-Host "    & `"$repoRoot\Set-Secret.ps1`" -Name $($s.Name)" -ForegroundColor White
+    }
 }
 
 if (-not ([Environment]::GetEnvironmentVariable('ENABLE_TOOL_SEARCH', 'User'))) {
