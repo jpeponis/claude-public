@@ -49,12 +49,27 @@ function Get-ProfilePaths {
     }
 
     # Ask pwsh itself, in case it reports somewhere the two paths above miss.
+    #
+    # The '2>$null' is why the preference is relaxed here. Redirecting a native command's
+    # stderr makes each line a PowerShell error record, and this file is dot-sourced into
+    # deploy/collect/restore/publish/sync-config, all of which set
+    # $ErrorActionPreference = 'Stop' -- which makes that record terminating. The catch
+    # below would then swallow it and quietly drop this path, so any startup message from
+    # pwsh (a profile warning, a preview-version notice) would cost us the very path this
+    # block exists to find, with nothing reported. Same shape as the Test-JsonValid bug:
+    # a catch hiding a failure rather than handling one.
     $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
     if ($pwsh) {
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         try {
             $p = & $pwsh.Source -NoProfile -NonInteractive -Command '$PROFILE.CurrentUserCurrentHost' 2>$null
             if ($p) { $paths += ([string]$p).Trim() }
-        } catch { }
+        } catch {
+            # pwsh present but unusable -- the two literal paths above still stand.
+        } finally {
+            $ErrorActionPreference = $previousEap
+        }
     }
 
     # And the shell running this script.
