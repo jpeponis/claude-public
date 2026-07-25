@@ -15,7 +15,13 @@
 #
 # Safe to run repeatedly: if the action id is already present, the file is left untouched.
 
+[CmdletBinding()]
+param([switch]$DryRun)
+
 $ErrorActionPreference = "Stop"
+$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $repoRoot "lib\Common.ps1")
+
 $actionId = "User.sendInput.ShiftEnterNewline"
 
 # --- Snippets (single-quoted here-strings: backslashes stay literal, e.g. \u001b\r) ---
@@ -37,21 +43,8 @@ $keybindingItem = @'
         }
 '@
 
-# --- Locate candidate settings.json files (packaged stable/Preview + unpackaged) ---
-function Get-TerminalSettingsPaths {
-    $paths = @()
-    $pkgRoot = Join-Path $env:LOCALAPPDATA "Packages"
-    if (Test-Path $pkgRoot) {
-        Get-ChildItem $pkgRoot -Directory -Filter "Microsoft.WindowsTerminal*" -ErrorAction SilentlyContinue |
-            ForEach-Object {
-                $p = Join-Path $_.FullName "LocalState\settings.json"
-                if (Test-Path $p) { $paths += $p }
-            }
-    }
-    $unpackaged = Join-Path $env:LOCALAPPDATA "Microsoft\Windows Terminal\settings.json"
-    if (Test-Path $unpackaged) { $paths += $unpackaged }
-    $paths | Select-Object -Unique
-}
+# NOTE: Get-TerminalSettingsPaths and Test-JsonValid now live in lib\Common.ps1
+# (shared with doctor.ps1), dot-sourced above.
 
 # --- Insert an item at the head of a top-level array; returns $null if the key is absent ---
 function Add-ToArray {
@@ -83,27 +76,11 @@ function Add-TopLevelArrayKey {
     return $Json.Substring(0, $idx + 1) + "`n" + $block + $Json.Substring($idx + 1)
 }
 
-# --- Validate JSON (tolerates comments + trailing commas, like Windows Terminal) ---
-function Test-JsonValid {
-    param([string]$Json)
-    try {
-        $opts = [System.Text.Json.JsonDocumentOptions]::new()
-        $opts.CommentHandling = [System.Text.Json.JsonCommentHandling]::Skip
-        $opts.AllowTrailingCommas = $true
-        [void][System.Text.Json.JsonDocument]::Parse($Json, $opts)
-        return $true
-    } catch {
-        return $false
-    }
-}
-
 $paths = @(Get-TerminalSettingsPaths)
 if ($paths.Count -eq 0) {
     Write-Host "[SKIP] Windows Terminal settings.json not found (Terminal may not be installed)." -ForegroundColor Yellow
     return
 }
-
-$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
 foreach ($path in $paths) {
     $label = $path.Replace($env:LOCALAPPDATA, '%LOCALAPPDATA%')
@@ -131,14 +108,18 @@ foreach ($path in $paths) {
             continue
         }
 
+        if ($DryRun) {
+            Write-Host "[DRY]  Would add Shift+Enter newline binding -> $label" -ForegroundColor Green
+            continue
+        }
+
         # Back up next to the repo, then write
-        $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
         $stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
         $backupDir = Join-Path $repoRoot ".backups\terminal\$stamp"
         New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
         Copy-Item $path (Join-Path $backupDir "settings.json") -Force
 
-        [System.IO.File]::WriteAllText($path, $updated2, $utf8NoBom)
+        Write-TextFile -Path $path -Content $updated2
         Write-Host "[OK]   Added Shift+Enter newline binding -> $label" -ForegroundColor Green
     } catch {
         Write-Host "[WARN] Failed to update $label : $($_.Exception.Message)" -ForegroundColor Yellow

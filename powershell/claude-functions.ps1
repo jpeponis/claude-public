@@ -1,3 +1,20 @@
+# claude-functions.ps1 — Claude Code shell functions.
+#
+# Deployed to ~/.claude/claude-functions.ps1 and dot-sourced by a small managed block
+# that deploy.ps1 injects into BOTH PowerShell profiles:
+#   Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1   (Windows PowerShell 5.1)
+#   Documents\PowerShell\Microsoft.PowerShell_profile.ps1          (PowerShell 7+)
+#
+# Why a separate file instead of syncing a whole profile: replacing a user's profile
+# destroys whatever else they keep in it, and syncing only the 5.1 path leaves every
+# one of these functions undefined in PowerShell 7. Both problems go away when the
+# profile merely sources this file.
+#
+# Note on --system-prompt vs --append-system-prompt (deliberate, not drift):
+#   claude-sp      uses --system-prompt-file        -> REPLACES the default system prompt
+#   claude-api-sp  uses --append-system-prompt-file -> APPENDS to the default
+# Keep it that way unless you intend to change behaviour.
+
 # --- Encrypted secret store: load GitHub token for the GitHub MCP plugin ---
 # The plugin's .mcp.json sends "Authorization: Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}",
 # expanded from the environment when Claude Code launches. Load it from the DPAPI

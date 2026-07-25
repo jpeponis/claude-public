@@ -7,12 +7,12 @@
   for the same Windows user on the same machine that ran Set-Secret.ps1.
 
 .PARAMETER Name
-  Logical secret name, e.g. 'stripe-key', 'github-token', 'api-key'.
+  Logical secret name, e.g. 'api-key', 'github-token'.
 
 .EXAMPLE
   $env:GITHUB_TOKEN = (.\Get-Secret.ps1 -Name github-token)
 .EXAMPLE
-  .\Get-Secret.ps1 -Name stripe-key
+  .\Get-Secret.ps1 -Name api-key
 #>
 [CmdletBinding()]
 param(

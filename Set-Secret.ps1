@@ -9,14 +9,14 @@
   other user, or on any other computer.
 
 .PARAMETER Name
-  Logical secret name. Produces ~/.claude/.<Name>.enc  (e.g. 'stripe-key', 'github-token').
+  Logical secret name. Produces ~/.claude/.<Name>.enc  (e.g. 'api-key', 'github-token').
 
 .PARAMETER Value
   Optional. The secret value. OMIT THIS for interactive use — you'll get a hidden secure
   prompt so the secret never lands in your shell history. Pass -Value only for automation.
 
 .EXAMPLE
-  .\Set-Secret.ps1 -Name stripe-key       # secure hidden prompt (recommended)
+  .\Set-Secret.ps1 -Name api-key          # secure hidden prompt (recommended)
 .EXAMPLE
   .\Set-Secret.ps1 -Name github-token
 #>

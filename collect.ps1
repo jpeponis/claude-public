@@ -9,15 +9,22 @@ $claudeHome = Join-Path $env:USERPROFILE ".claude"
 $desktopDir = Join-Path $env:USERPROFILE "Desktop"
 
 # --- Individual file mappings ---
-# NOTE: "System Prompt.txt" and "claude-api.ps1" live directly in the repo root — no collect needed.
-# NOTE: ~/.claude/.*.enc secrets (api-key, github-token, ...) are NEVER collected
-#       (sensitive, DPAPI-encrypted, machine-specific). The allowlist below excludes them structurally.
+# NOTE: Repo-native files ("System Prompt.txt", lib\, and the launcher / doctor / restore /
+#       publish scripts) live in the repo — no collect needed.
+# NOTE: ~/.claude/.*.enc secrets are NEVER collected (sensitive, DPAPI-encrypted,
+#       machine-specific). The allowlist below excludes them structurally; the registry
+#       of expected secret names lives in secrets.json.
+# NOTE: The PowerShell profile is deliberately NOT collected. The shell functions live in
+#       claude-functions.ps1, which each profile dot-sources via a managed block that
+#       deploy.ps1 injects. Collecting a whole profile would drag in whatever unrelated
+#       shell config the user keeps there — and would only ever capture one of the two
+#       profile paths (5.1 vs 7+).
 $fileMappings = @(
     @{ Source = "$claudeHome\settings.json";              Dest = "global\settings.json" }
     @{ Source = "$claudeHome\statusline-command.ps1";     Dest = "global\statusline-command.ps1" }
+    @{ Source = "$claudeHome\claude-functions.ps1";       Dest = "powershell\claude-functions.ps1" }
     @{ Source = "$desktopDir\CLAUDE.md";                   Dest = "project-desktop\CLAUDE.md" }
     @{ Source = "$desktopDir\.claude\settings.local.json"; Dest = "project-desktop\.claude\settings.local.json" }
-    @{ Source = "$env:USERPROFILE\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1"; Dest = "powershell\Microsoft.PowerShell_profile.ps1" }
 )
 
 # --- Directory mappings (each Filter synced as a unit) ---
