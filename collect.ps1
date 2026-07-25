@@ -36,8 +36,52 @@ $dirMappings = @(
     @{ SourceDir = "$desktopDir\.claude\workflows"; DestDir = "project-desktop\.claude\workflows"; Filter = "*.js" }
 )
 
+# --- Settings the repo owns, which collect must not overwrite from this machine ---
+# A collected file is normally a faithful snapshot of whatever is live. 'model' is the
+# exception. It records whichever model the last session happened to be using rather
+# than a decision about how this config is set up -- it changed twice in forty minutes
+# on the day this was written. Collecting it produces noisy commits, and a later
+# /sync-config pull then switches the model out from under whoever is working on the
+# other machine.
+#
+# So the repo's value wins in this direction only: deploy still applies it, which is how
+# a new machine gets the intended default. To change the default, edit the repo file.
+$repoOwnedKeys = @(
+    @{ File = "global\settings.json"; Key = "model" }
+)
+
 $collected = 0
 $skipped = 0
+
+# The value of a single JSON string key, or $null. Text, not ConvertFrom-Json, because
+# the result is spliced straight back into the file below.
+function Get-JsonStringValue {
+    param([string]$Text, [string]$Key)
+    $m = [regex]::Match($Text, '"' + [regex]::Escape($Key) + '"\s*:\s*"([^"]*)"')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $null
+}
+
+# Puts the repo's existing value for one key back into freshly collected content.
+# Spliced by index rather than parsed and re-serialized: a ConvertTo-Json round trip
+# would reformat and reorder the whole file, burying the real change in every diff.
+function Restore-RepoOwnedKey {
+    param([string]$Content, [string]$RepoPath, [string]$Key)
+
+    if (-not (Test-Path $RepoPath)) { return $Content }   # first collect: take what is live
+    $repoValue = Get-JsonStringValue -Text (Get-Content $RepoPath -Raw -Encoding UTF8) -Key $Key
+    if ($null -eq $repoValue) { return $Content }
+
+    $localValue = Get-JsonStringValue -Text $Content -Key $Key
+    if ($null -eq $localValue -or $localValue -eq $repoValue) { return $Content }
+
+    $m = [regex]::Match($Content, '("' + [regex]::Escape($Key) + '"\s*:\s*)"[^"]*"')
+    if (-not $m.Success) { return $Content }
+
+    Write-Host "       kept repo's $Key = $repoValue (this machine is using $localValue)" -ForegroundColor DarkGray
+    return $Content.Substring(0, $m.Index) + $m.Groups[1].Value + '"' + $repoValue + '"' +
+           $Content.Substring($m.Index + $m.Length)
+}
 
 # Helper: read, parameterize username, and write a single file
 function Copy-Parameterized {
@@ -51,6 +95,10 @@ function Copy-Parameterized {
 
     $content = Get-Content -Path $SrcPath -Raw -Encoding UTF8
     $content = $content -replace $escapedUsername, '{{USERNAME}}'
+
+    foreach ($owned in @($repoOwnedKeys | Where-Object { $_.File -eq $Label })) {
+        $content = Restore-RepoOwnedKey -Content $content -RepoPath $DestPath -Key $owned.Key
+    }
 
     $destDir = Split-Path -Parent $DestPath
     if (-not (Test-Path $destDir)) {
