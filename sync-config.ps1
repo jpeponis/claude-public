@@ -1,6 +1,7 @@
 # sync-config.ps1 — Unified push/pull for Claude Code config repo
 # Usage:
 #   sync-config.ps1 pull                  Pull from remote and deploy to local machine
+#   sync-config.ps1 pull -DryRun          Pull, then preview the deploy without writing anything
 #   sync-config.ps1 push -DryRun          Collect local config, stage, show what would be committed
 #   sync-config.ps1 push                  Collect, stage, commit, and push to remote
 #
@@ -30,7 +31,9 @@ if (-not (Test-Path (Join-Path $repoRoot ".git"))) {
 }
 
 function Invoke-Pull {
-    Write-Host "=== PULL ===" -ForegroundColor Cyan
+    param([bool]$DryRun)
+
+    Write-Host "=== PULL $(if ($DryRun) {'(dry run) '})===" -ForegroundColor Cyan
 
     # Fetch and pull
     Write-Host "Pulling from origin/main..." -ForegroundColor White
@@ -40,9 +43,10 @@ function Invoke-Pull {
         exit 1
     }
 
-    # Deploy
+    # Deploy. -DryRun previews every local write without performing any — worth using
+    # on a machine whose existing config you have not inspected yet.
     Write-Host ""
-    & (Join-Path $repoRoot "deploy.ps1")
+    & (Join-Path $repoRoot "deploy.ps1") -DryRun:$DryRun
 }
 
 function Invoke-Push {
@@ -108,6 +112,6 @@ function Invoke-Push {
 
 # --- Dispatch ---
 switch ($Action) {
-    "pull" { Invoke-Pull }
+    "pull" { Invoke-Pull -DryRun $DryRun.IsPresent }
     "push" { Invoke-Push -DryRun $DryRun.IsPresent }
 }

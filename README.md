@@ -12,13 +12,25 @@ A template for syncing Claude Code settings, agents, slash commands, and dynamic
   - `CLAUDE.md` — Project instructions
   - `.claude/settings.local.json` — Project-local settings
   - `.claude/workflows/` — Dynamic workflow scripts (`*.js`, e.g. deep-research-tiered)
-- `powershell/` — Maps to `Documents\WindowsPowerShell\`
-  - `Microsoft.PowerShell_profile.ps1` — Profile with claude-sp, claude-api, etc.
+- `powershell/`
+  - `claude-functions.ps1` — The `claude-sp` / `claude-api*` shell functions. Deployed to
+    `~/.claude/claude-functions.ps1`; your PowerShell profile only gets a small managed block that
+    dot-sources it. **Your profile is never replaced** — anything you keep in it is left alone. The
+    block is injected into *both* profile paths, `Documents\WindowsPowerShell\` (PowerShell 5.1) and
+    `Documents\PowerShell\` (PowerShell 7+), so the functions exist in whichever shell you open.
+- `lib/Common.ps1` — Shared helpers (profile discovery, managed-block injection, Windows Terminal
+  settings location, JSON validation).
+- `secrets.json` — Names of the optional encrypted secrets and what each unlocks. Add an entry here
+  if you add a skill that needs its own key.
 - `collect.ps1` — Gather local config into repo (parameterizes username)
-- `deploy.ps1` — Deploy repo config to local machine (inserts local username)
+- `deploy.ps1` — Deploy repo config to local machine (inserts local username). Run it with
+  `-DryRun` first to see every file it would touch without writing anything. It only ever removes
+  files it previously deployed (tracked in `~/.claude/.deployed-manifest.json`), so skills and
+  agents you write yourself are never deleted — and anything it does overwrite is copied to
+  `.backups\<timestamp>\` first.
 - `Set-Secret.ps1` / `Get-Secret.ps1` — Per-machine encrypted secret store (repo-native).
   Secrets are DPAPI-encrypted to `%USERPROFILE%\.claude\.<name>.enc` (current user, current
-  machine only) and are never collected or deployed; `deploy.ps1` warns about missing ones.
+  machine only) and are never collected or deployed; `deploy.ps1` reports missing ones.
 - `System Prompt.txt` — Custom system prompt (repo-native, not collected/deployed)
 - `claude-api.ps1` — Standalone API-mode launcher (repo-native)
 - `apply-terminal-keybinding.ps1` — Repo-native; injects a Shift+Enter→newline action into the
@@ -57,13 +69,21 @@ Settings files contain hardcoded Windows paths like `C:\Users\<name>\...`. Since
      - **Metadata**: Read-only (auto-selected)
    - Click "Generate token" and copy it
 
-3. Set the token as a persistent environment variable:
+3. Store the token in the encrypted secret store:
    ```powershell
-   [Environment]::SetEnvironmentVariable("GITHUB_PERSONAL_ACCESS_TOKEN", "<paste-token-here>", "User")
+   & "$env:USERPROFILE\Desktop\claude-config\Set-Secret.ps1" -Name github-token
    ```
-   Then **close and reopen your terminal** for it to take effect.
+   This prompts for the value with the input hidden, then DPAPI-encrypts it to
+   `~/.claude/.github-token.enc` — readable only by your Windows account on this machine.
+   `claude-functions.ps1` loads it into the environment when a shell starts, so the plaintext
+   never lands in your registry, your shell history, or a file.
 
-4. Deploy configuration:
+   Do **not** set it as a plain `[Environment]::SetEnvironmentVariable(...)` User variable. That
+   stores the token in the registry in the clear, and — because the loader only reads the encrypted
+   store when the variable is unset — it silently shadows the encrypted path, so you get the weaker
+   of the two and no indication of it.
+
+4. Deploy configuration. Add `-DryRun` first if you want to see exactly what it would touch:
    ```powershell
    powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Desktop\claude-config\deploy.ps1"
    ```
