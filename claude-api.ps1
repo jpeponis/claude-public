@@ -11,22 +11,25 @@ param(
     [switch]$Extended,
     [switch]$SP,
     [switch]$SPSP,
-    [string]$Model = "claude-opus-4-6"
+    # An alias, not a pinned id: 'opus' always resolves to the current Opus, so this
+    # file does not go stale every time a model ships. Pass a full id (for example
+    # claude-opus-5) only when a specific version actually matters.
+    [string]$Model = "opus"
 )
 
-# Decrypt the API key
-$encrypted = Get-Content "$env:USERPROFILE\.claude\.api-key.enc"
-$secure = $encrypted | ConvertTo-SecureString
-$env:ANTHROPIC_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-)
+# One decrypt path for the whole repo -- see Get-Secret.ps1. Reimplementing it here
+# meant a store this script could not read still looked fine everywhere else.
+$env:ANTHROPIC_API_KEY = & (Join-Path $PSScriptRoot "Get-Secret.ps1") -Name api-key
 
 # Build arguments
 $args_list = @()
 
+# With no -Model, pass no --model at all, so the session follows whatever
+# settings.json selects. Testing the bound parameter rather than comparing against
+# the default string means the two can never drift apart.
 if ($Extended) {
     $args_list += "--model", "$Model[1m]"
-} elseif ($Model -ne "claude-opus-4-6") {
+} elseif ($PSBoundParameters.ContainsKey('Model')) {
     $args_list += "--model", $Model
 }
 
