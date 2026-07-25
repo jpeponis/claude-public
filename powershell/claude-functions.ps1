@@ -15,16 +15,31 @@
 #   claude-api-sp  uses --append-system-prompt-file -> APPENDS to the default
 # Keep it that way unless you intend to change behaviour.
 
+# --- Where this repo lives ---------------------------------------------------
+# GetFolderPath('Desktop'), not "$env:USERPROFILE\Desktop": OneDrive Known Folder
+# Move redirects Desktop on a default Windows 11 consumer setup, so the literal path
+# is either missing or a stale leftover -- and claude-sp would go looking for the
+# system prompt in a directory that does not exist. codex-sp below already resolved
+# Desktop this way; nothing else in this file did.
+#
+# This assumes the repo sits at <Desktop>\claude-config, which is where bootstrap.ps1
+# and the README put it. Installing anywhere else (bootstrap.ps1 -Dest) would need
+# deploy.ps1 to template the path in, the way it already does for {{USERNAME}}.
+function Get-ClaudeConfigPath {
+    param([string]$Leaf)
+    return (Join-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config') $Leaf)
+}
+
 # --- Encrypted secret store: load GitHub token for the GitHub MCP plugin ---
 # The plugin's .mcp.json sends "Authorization: Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}",
 # expanded from the environment when Claude Code launches. Load it from the DPAPI
 # store (~/.claude/.github-token.enc, created by Set-Secret.ps1) if not already set.
 if (-not $env:GITHUB_PERSONAL_ACCESS_TOKEN -and (Test-Path "$env:USERPROFILE\.claude\.github-token.enc")) {
-    $env:GITHUB_PERSONAL_ACCESS_TOKEN = & "$env:USERPROFILE\Desktop\claude-config\Get-Secret.ps1" -Name github-token
+    $env:GITHUB_PERSONAL_ACCESS_TOKEN = & (Get-ClaudeConfigPath "Get-Secret.ps1") -Name github-token
 }
 
 function claude-sp {
-    claude --system-prompt-file "$env:USERPROFILE\Desktop\claude-config\System Prompt.txt" @args
+    claude --system-prompt-file (Get-ClaudeConfigPath "System Prompt.txt") @args
 }
 
 function claude-spsp {
@@ -37,7 +52,7 @@ function claude-spsp {
 # github-token loader above already does it. Three separate copies of this decrypt
 # existed; a store none of them could read still reported as present everywhere.
 function Get-AnthropicApiKey {
-    return & "$env:USERPROFILE\Desktop\claude-config\Get-Secret.ps1" -Name api-key
+    return & (Get-ClaudeConfigPath "Get-Secret.ps1") -Name api-key
 }
 
 function claude-api {
@@ -49,7 +64,7 @@ function claude-api {
 function claude-api-sp {
     $env:ANTHROPIC_API_KEY = Get-AnthropicApiKey
     try {
-        claude --append-system-prompt-file "$env:USERPROFILE\Desktop\claude-config\System Prompt.txt" @args
+        claude --append-system-prompt-file (Get-ClaudeConfigPath "System Prompt.txt") @args
     }
     finally { Remove-Item Env:\ANTHROPIC_API_KEY -ErrorAction SilentlyContinue }
 }
