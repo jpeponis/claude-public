@@ -7,7 +7,7 @@ A template for syncing Claude Code settings, agents, slash commands, and dynamic
 - `global/` — Maps to `%USERPROFILE%\.claude\` (global Claude Code config)
   - `settings.json` — Global settings and permissions
   - `agents/` — Agent definitions (e.g., file-manager, research-worker — minimal-context worker used by deep-research-tiered)
-  - `commands/` — Slash commands (e.g., sync-config)
+  - `commands/` — Slash commands (e.g., sync-config; api-agent — runs a prompt through a separate API-billed Claude process for features the subscription lacks, such as the 1M context window)
 - `project-desktop/` — Maps to `%USERPROFILE%\Desktop\` (project-level config)
   - `CLAUDE.md` — Project instructions
   - `.claude/settings.local.json` — Project-local settings
@@ -70,7 +70,7 @@ Settings files contain hardcoded Windows paths like `C:\Users\<name>\...`. Since
 
 5. Restart Claude Code and verify:
    - Settings load correctly (model, permissions)
-   - The `/sync-config` slash command appears
+   - The `/sync-config` and `/api-agent` slash commands appear
    - The file-manager agent is available
    - The GitHub MCP plugin connects (try asking Claude a GitHub-related question)
 

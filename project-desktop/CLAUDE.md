@@ -1,10 +1,11 @@
 ## Agent Usage
-- Delegate all file/folder operations (move, copy, delete, rename, organize) to the file-manager agent.
+- Delegate bulk or multi-file operations (organize, mass move/copy/rename/delete) to the file-manager agent. Trivial single-file operations may be done inline.
+- Before dispatching any file-manager task, verify the destination path exists (a one-second `ls` beats a 45-second agent round-trip that bounces back with a question).
 
 ## Claude Code File Locations
 - **Global settings**: `C:\Users\{{USERNAME}}\.claude\settings.json`
 - **Project-local settings**: `C:\Users\{{USERNAME}}\Desktop\.claude\settings.local.json`
-- **Skills (slash commands)**: `C:\Users\{{USERNAME}}\.claude\commands\` (Markdown files, e.g., `sync-config.md`)
+- **Skills (slash commands)**: `C:\Users\{{USERNAME}}\.claude\commands\` (Markdown files, e.g., `sync-config.md`, `api-agent.md`)
 - **Agent definitions**: `C:\Users\{{USERNAME}}\.claude\agents\` (Markdown files, e.g., `file-manager.md`)
 - **Project instructions**: `C:\Users\{{USERNAME}}\Desktop\CLAUDE.md` (this file)
 - **Encrypted API key**: `C:\Users\{{USERNAME}}\.claude\.api-key.enc` (DPAPI-encrypted, same-user-only)
@@ -13,6 +14,7 @@
 - **Default (subscription)**: Pro plan. No `ANTHROPIC_API_KEY` set. 200K context limit.
 - **API mode**: Pay-as-you-go. Enables 1M token context via `--model modelname[1m]`.
 - **Toggle mechanism**: PowerShell functions `claude-api`, `claude-api-sp`, `claude-api-spsp` set the API key from the encrypted store and clean it up on exit.
+- **In-session API work**: Use `/api-agent` skill to shell out to a separate API-billed Claude process.
 - **Standalone script**: `Desktop\claude-config\claude-api.ps1` launches a full API-mode session with `-Extended`, `-SP`, `-SPSP` flags.
 - **System prompt**: `Desktop\claude-config\System Prompt.txt` — referenced by all `-sp`/`-spsp` variants.
 
@@ -30,6 +32,12 @@
 - **On-demand enable (do this automatically):** When a task needs the Workflow tool (e.g. `/deep-research-tiered`, `/deep-research`, or any `.claude/workflows/*.js` script), FIRST set `"enableWorkflows": true` in `C:\Users\{{USERNAME}}\.claude\settings.json`, THEN call the Workflow tool on the next step (the schema appears in the rebuilt request).
 - **Restore lean default:** Once the workflow has launched, set `"enableWorkflows": false` again so future sessions stay lean.
 - **Alternative (no in-session edits):** launch a workflow-enabled session with `claude --settings "C:\Users\{{USERNAME}}\.claude\workflows-on.json"` (that file contains `{"enableWorkflows": true}` and overrides only that key).
+
+## Machine Notes (lessons from live sessions)
+- **Reduced motion**: check Windows → Accessibility → Visual effects → "Animation effects". When it is OFF, every browser on the machine reports `prefers-reduced-motion: reduce` and animated site features show their static fallbacks. If web animations mysteriously "don't play" in local browsers, check that setting first.
+- **Headless testing caveat**: Playwright contexts default to `reducedMotion: 'no-preference'` regardless of the OS setting — what a headless run verifies is not automatically what you see in your own browser. Verify both paths explicitly (`newContext({ reducedMotion: 'reduce' })` for the fallback).
+- **claude-in-chrome extension**: if its tools report "not connected," run `/mcp` (it reconnects in-session) — don't retry more than twice. Fallback that works well: `playwright-core` driving the installed Chrome (`chromium.launch({ channel: 'chrome' })`), which downloads no browser.
+- **Background dev servers**: stop `python -m http.server` (and similar) background tasks when the work phase ends; don't leave them running for someone else to clean up.
 
 ## Bash ↔ PowerShell Escaping
 - Never pass complex PowerShell (containing `$variables`, `$null`, nested quotes) inline via `powershell.exe -Command "..."` from bash. Both shells fight over `$`.
