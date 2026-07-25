@@ -1,156 +1,235 @@
-# Claude Code Portable Configuration
+# Claude Code, set up
 
-A template for syncing Claude Code settings, agents, slash commands, and dynamic workflows across multiple Windows machines. This is the public version of a personal setup — feel free to fork, adapt, and add your own skills, agents, and workflows.
+A working Claude Code configuration for Windows — launchers, a system prompt, agents,
+slash commands, a statusline, and a sync mechanism that carries all of it to your next
+machine. Install it in one command, verify it in one more, and undo it if you don't like it.
 
-## Repository Structure
+This started as one person's setup, and it's shared because bootstrapping someone else's
+Claude Code by hand costs an afternoon. Fork it and it becomes yours.
 
-- `global/` — Maps to `%USERPROFILE%\.claude\` (global Claude Code config)
-  - `settings.json` — Global settings and permissions
-  - `agents/` — Agent definitions (e.g., file-manager, research-worker — minimal-context worker used by deep-research-tiered)
-  - `commands/` — Slash commands (e.g., sync-config; api-agent — runs a prompt through a separate API-billed Claude process for features the subscription lacks, such as the 1M context window)
-- `project-desktop/` — Maps to `%USERPROFILE%\Desktop\` (project-level config)
-  - `CLAUDE.md` — Project instructions
-  - `.claude/settings.local.json` — Project-local settings
-  - `.claude/workflows/` — Dynamic workflow scripts (`*.js`, e.g. deep-research-tiered)
-- `powershell/`
-  - `claude-functions.ps1` — The `claude-sp` / `claude-api*` shell functions. Deployed to
-    `~/.claude/claude-functions.ps1`; your PowerShell profile only gets a small managed block that
-    dot-sources it. **Your profile is never replaced** — anything you keep in it is left alone. The
-    block is injected into *both* profile paths, `Documents\WindowsPowerShell\` (PowerShell 5.1) and
-    `Documents\PowerShell\` (PowerShell 7+), so the functions exist in whichever shell you open.
-- `lib/Common.ps1` — Shared helpers (profile discovery, managed-block injection, Windows Terminal
-  settings location, JSON validation).
-- `secrets.json` — Names of the optional encrypted secrets and what each unlocks. Add an entry here
-  if you add a skill that needs its own key.
-- `collect.ps1` — Gather local config into repo (parameterizes username)
-- `deploy.ps1` — Deploy repo config to local machine (inserts local username). Run it with
-  `-DryRun` first to see every file it would touch without writing anything. It only ever removes
-  files it previously deployed (tracked in `~/.claude/.deployed-manifest.json`), so skills and
-  agents you write yourself are never deleted — and anything it does overwrite is copied to
-  `.backups\<timestamp>\` first.
-- `Set-Secret.ps1` / `Get-Secret.ps1` — Per-machine encrypted secret store (repo-native).
-  Secrets are DPAPI-encrypted to `%USERPROFILE%\.claude\.<name>.enc` (current user, current
-  machine only) and are never collected or deployed; `deploy.ps1` reports missing ones.
-- `doctor.ps1` — Repo-native. Checks what is actually true on your machine after a deploy and
-  prints a pass/warn/fail line per item, each failure paired with the command that fixes it.
-  Run it any time you are not sure the setup took. `deploy.ps1` can only report what it *wrote*;
-  this reports what *works* — the distinction matters, because a file can be written correctly to
-  a location nothing reads. Exits non-zero if anything failed. `sync-config.ps1 pull` runs it
-  automatically.
-- `System Prompt.txt` — Custom system prompt (repo-native, not collected/deployed)
-- `claude-api.ps1` — Standalone API-mode launcher (repo-native)
-- `apply-terminal-keybinding.ps1` — Repo-native; injects a Shift+Enter→newline action into the
-  local Windows Terminal `settings.json`. Run automatically at the end of `deploy.ps1`.
+## What you get
 
-## How Path Portability Works
+- **`claude-sp`** — Claude Code with a custom system prompt and permissions in auto mode.
+  The main way in. Also `claude-spsp`, which additionally skips permission prompts.
+- **`/sync-config`** — push your whole configuration to your fork, pull it onto another
+  machine. Settings, slash commands, agents, workflows, the system prompt, the launchers.
+- **A statusline** showing user@machine, the current directory and git branch, context
+  remaining, and elapsed session time.
+- **`file-manager`** — an agent for bulk file operations, so they don't eat your main context.
+- **`/api-agent`** and **`claude-api*`** — run a prompt through pay-as-you-go API billing
+  instead of your subscription, for the 1M-token context window.
+- **A deep-research workflow** — a multi-agent script that fans out across sources, verifies
+  claims on a cheap model, escalates the doubtful ones, and writes a cited report.
+- **An encrypted secret store** — API keys held by Windows DPAPI, readable only by your
+  account on your machine. Never committed, never synced.
+- **Shift+Enter for a newline** in Windows Terminal, instead of submitting the message.
+- **`doctor.ps1` and `restore.ps1`** — check what actually works; put back what a deploy changed.
 
-Settings files contain hardcoded Windows paths like `C:\Users\<name>\...`. Since usernames differ across machines, the scripts replace the username with a `{{USERNAME}}` placeholder in the repo, and substitute the local machine's `%USERNAME%` when deploying.
+## Install
 
-## First-Time Setup on a New Machine
-
-### Prerequisites
-- Git installed and configured with GitHub credentials
-- Node.js 22+ (for Claude Code)
-- Claude Code installed
-
-### Steps
-
-1. Clone this repo (or your fork of it):
-   ```powershell
-   git clone https://github.com/jpeponis/claude-public.git "$env:USERPROFILE\Desktop\claude-config"
-   ```
-
-   If you plan to use this as your own ongoing sync repo, fork it first (or create your own empty repo) and clone that instead. Otherwise `sync-config push` will fail because you won't have write access to the upstream.
-
-2. Create a GitHub Personal Access Token (only needed if you want the GitHub MCP plugin):
-   - Go to https://github.com/settings/tokens?type=beta (Fine-grained tokens)
-   - Click "Generate new token"
-   - Name it something like "Claude Code MCP"
-   - Set expiration (recommend 90 days)
-   - Under "Repository access", select "All repositories" (or specific ones)
-   - Under "Permissions", grant:
-     - **Contents**: Read and write
-     - **Issues**: Read and write
-     - **Pull requests**: Read and write
-     - **Metadata**: Read-only (auto-selected)
-   - Click "Generate token" and copy it
-
-3. Store the token in the encrypted secret store:
-   ```powershell
-   & "$env:USERPROFILE\Desktop\claude-config\Set-Secret.ps1" -Name github-token
-   ```
-   This prompts for the value with the input hidden, then DPAPI-encrypts it to
-   `~/.claude/.github-token.enc` — readable only by your Windows account on this machine.
-   `claude-functions.ps1` loads it into the environment when a shell starts, so the plaintext
-   never lands in your registry, your shell history, or a file.
-
-   Do **not** set it as a plain `[Environment]::SetEnvironmentVariable(...)` User variable. That
-   stores the token in the registry in the clear, and — because the loader only reads the encrypted
-   store when the variable is unset — it silently shadows the encrypted path, so you get the weaker
-   of the two and no indication of it.
-
-4. Deploy configuration. Add `-DryRun` first if you want to see exactly what it would touch:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Desktop\claude-config\deploy.ps1"
-   ```
-
-5. Verify the install:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Desktop\claude-config\doctor.ps1"
-   ```
-   You want `all checks passed`. Warnings are usually fine — an optional secret you skipped, or
-   Windows Terminal not being installed. Failures come with the command that fixes them.
-
-6. **Open a new terminal tab**, then restart Claude Code. The shell functions only exist in shells
-   started after the deploy, and Claude Code reads its settings at launch. Then try:
-   - `claude-sp` — the main way in (see "Start here" below)
-   - `/sync-config` and `/api-agent` should appear in the slash-command list
-   - the `file-manager` agent should be available
-
-## Ongoing Usage
-
-### From within Claude Code
-Use the `/sync-config` slash command:
-- `/sync-config pull` — Pull latest config from repo and deploy locally
-- `/sync-config push` — Collect local config, commit, and push to repo
-
-### From PowerShell
-
-**Push local changes to repo:**
 ```powershell
-cd "$env:USERPROFILE\Desktop\claude-config"
-powershell -ExecutionPolicy Bypass -File collect.ps1
-git add -A && git commit -m "Update config" && git push
+irm https://raw.githubusercontent.com/jpeponis/claude-public/main/bootstrap.ps1 | iex
 ```
 
-**Pull changes from repo:**
+It forks this repo to your GitHub account, clones the fork to `<Desktop>\claude-config`,
+deploys the configuration, and verifies the result. It shows you the plan and asks before
+it changes anything.
+
+To read what it would do without doing it — worth doing, since you're about to run a script
+from the internet:
+
 ```powershell
-cd "$env:USERPROFILE\Desktop\claude-config"
-git pull
-powershell -ExecutionPolicy Bypass -File deploy.ps1
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/jpeponis/claude-public/main/bootstrap.ps1))) -DryRun
 ```
 
-## Windows Terminal Shift+Enter
+Other flags: `-NoFork` (read-only clone, no config push), `-Dest <path>`, `-Yes`.
 
-`apply-terminal-keybinding.ps1` makes **Shift+Enter** insert a newline (instead of submitting)
-in Claude Code under Windows Terminal. It does *not* sync the whole Terminal `settings.json`
-(that file holds machine-specific profile GUIDs and lives under a package path that varies per
-machine). Instead it surgically adds two idempotent blocks to whatever local `settings.json`
-exists — a `sendInput` action emitting `\u001b\r` (ESC+CR, which Claude Code reads as a newline)
-and a `shift+enter` keybinding mapped to it. Re-running is a no-op once present; the original
-file is backed up to `.backups\terminal\` before any change. `deploy.ps1` invokes it
-automatically, so `/sync-config pull` applies it on every machine.
+**Requirements:** Windows, [Git](https://git-scm.com/), [GitHub CLI](https://cli.github.com/)
+(`gh auth login`), [Node.js 22+](https://nodejs.org/), and Claude Code
+(`npm install -g @anthropic-ai/claude-code`). Bootstrap checks each one and stops with the
+exact command to fix it rather than half-installing.
 
-## Dynamic Workflows
+Prefer to do it by hand? Clone the repo and run `deploy.ps1`, then `doctor.ps1`. Fork first
+if you want `/sync-config push` to work.
 
-[Dynamic workflows](https://docs.claude.com/en/docs/claude-code/) are `*.js` scripts under `%USERPROFILE%\Desktop\.claude\workflows\` that orchestrate multiple subagents deterministically. They are synced as a unit (every `*.js` file in that folder), the same way agents and slash commands are. The included `deep-research-tiered.js` is a sample: the session model decomposes the question into search angles and key assertions, worker-model agents fan out to search and fetch sources, each extracted claim gets a fast Haiku scan that escalates doubtful or key-assertion claims to two Sonnet adversarial-lens votes, and the session model synthesizes a cited report and runs a completeness critique against the key assertions. Every spawned agent uses the lightweight `research-worker` agent definition (`global/agents/research-worker.md`) — a barebones system prompt with no MCP tools or skills.
+## Start here
 
-Because workflow scripts hold no machine-specific paths, they are copied verbatim (the username placeholder pass is a no-op on them).
+**Open a new terminal tab** — the shell functions only exist in shells started after the
+deploy — then:
 
-## Adding New Files to Sync
+```powershell
+claude-sp
+```
 
-To add a new **individual file**: edit `collect.ps1` and `deploy.ps1` and add an entry to the `$fileMappings` array.
+That's Claude Code with the system prompt from `System Prompt.txt` and permissions in auto
+mode. It's what gets used day to day.
 
-To add a new **folder of files** (like agents, commands, or workflows): add an entry to the `$dirMappings` array with a `Filter` (e.g. `*.md` or `*.js`). All matching files in the folder are synced as a unit, and files deleted locally are removed from the repo on the next collect (and vice-versa on deploy, with a backup first).
+`claude-spsp` is the same thing plus `--dangerously-skip-permissions`. It stops asking before
+it acts. Watch `claude-sp` work for a while before you reach for it, so you know what you're
+agreeing to in advance.
 
-Then run `collect.ps1` to bring the file(s) into the repo, and commit and push.
+**On cost:** the shipped settings are Opus at `xhigh` effort. That is deliberate — it's the
+full-capability setting, and it's the right baseline for judging whether the cheaper models
+are good enough for your work. It will also consume a Pro subscription quickly. Change
+`"model"` in `global/settings.json` to `sonnet` or `haiku` (and `"effortLevel"` to `high` or
+`medium`) and re-run `deploy.ps1` when you want to trade capability for headroom.
+
+Inside Claude Code, `/sync-config` and `/api-agent` should appear in the slash-command list,
+and `file-manager` in the agent list.
+
+## Sync
+
+The point of the repo. One command moves your configuration between machines.
+
+```powershell
+/sync-config push    # collect this machine's config, commit, push to your fork
+/sync-config pull    # pull from your fork, deploy here, then verify
+```
+
+Or from PowerShell directly: `sync-config.ps1 push` / `sync-config.ps1 pull`.
+
+**What's synced:** `global/settings.json`, slash commands, agents, the statusline, the shell
+functions, `CLAUDE.md`, project-local settings, and workflow scripts. **What isn't:** the
+encrypted secrets (per-machine by construction), and your PowerShell profile — the functions
+live in their own file that your profile sources, so nothing else in your profile is touched.
+
+**How it moves between machines:** settings files contain absolute paths with your Windows
+username in them. `collect.ps1` rewrites your username to `{{USERNAME}}` on the way into the
+repo, and `deploy.ps1` substitutes the local one on the way out. Collect verifies afterwards
+that no real username leaked into the repo.
+
+**Because you forked it, push works.** Pushing to a repo you don't own doesn't — which is why
+bootstrap forks by default. To take later changes from upstream:
+
+```powershell
+git -C "$env:USERPROFILE\Desktop\claude-config" pull upstream main
+```
+
+One key is deliberately *not* collected: `model` in `global/settings.json`. It tracks whichever
+model you happened to be using, so collecting it would let one machine's passing choice
+silently change the model on another. The repo's value is the default; edit the file to change it.
+
+## Verify and recover
+
+```powershell
+.\doctor.ps1
+```
+
+Reports what is actually true on this machine: Claude Code and Node versions, settings that
+parse, every command and agent the repo ships being present, the statusline actually
+executing, both PowerShell profiles wired up, the Shift+Enter binding, and secrets that
+actually decrypt. Each failure prints the command that fixes it; it exits non-zero if
+anything failed, and `/sync-config pull` runs it automatically.
+
+This exists because `deploy.ps1` can only report what it *wrote*. A file can be written
+perfectly to a location nothing reads — that gap survived four months here before a doctor
+script found it.
+
+```powershell
+.\restore.ps1                 # list what can be restored
+.\restore.ps1 -Latest -DryRun # preview
+.\restore.ps1 -Latest         # put it back
+```
+
+Every deploy backs up what it's about to overwrite into `.backups\<timestamp>\` with a
+manifest recording where each file came from. Restore puts them back exactly there, and skips
+files that already match, so recovering one bad file rewrites only that file.
+
+`deploy.ps1` is additive by design: it adds a small marked block to your PowerShell profiles
+rather than replacing them, and it only ever deletes files it previously deployed itself
+(tracked in `~/.claude/.deployed-manifest.json`), so slash commands and agents you write
+yourself are never touched.
+
+## Optional extras
+
+Everything above works without any of this.
+
+### GitHub MCP
+
+The GitHub plugin is enabled in settings and needs a token to do anything.
+
+1. Create a fine-grained token at <https://github.com/settings/tokens?type=beta> with
+   **Contents**, **Issues**, and **Pull requests** set to read/write.
+2. Store it encrypted:
+   ```powershell
+   .\Set-Secret.ps1 -Name github-token
+   ```
+
+It prompts with the input hidden and DPAPI-encrypts it to `~/.claude/.github-token.enc`,
+readable only by your Windows account on that machine. `claude-functions.ps1` loads it into
+the environment at shell start, so the plaintext never lands in your registry, your shell
+history, or a file.
+
+Don't set it as a plain user environment variable instead. That stores the token in the
+registry in clear text, and the loader only reads the encrypted store when the variable is
+unset — so you'd silently get the weaker of the two.
+
+### API mode
+
+Runs Claude Code against pay-as-you-go API billing rather than your subscription, which is
+how you get the 1M-token context window. Needs an Anthropic API key:
+
+```powershell
+.\Set-Secret.ps1 -Name api-key
+```
+
+Then `claude-api`, `claude-api-sp`, `claude-api-spsp`, or `claude-api.ps1 -Extended`. Inside
+a subscription session, `/api-agent` shells one prompt out to an API-billed process. **This
+is billed per token, separately from your subscription.**
+
+The model defaults to the alias `opus`, which always resolves to the current Opus, so it
+doesn't go stale when a new model ships. Pass `-Model` to pin a specific one.
+
+> **One deliberate inconsistency.** `claude-sp` uses `--system-prompt-file`, which *replaces*
+> Claude Code's default system prompt. `claude-api-sp` uses `--append-system-prompt-file`,
+> which *appends* to it. That difference is intentional, not drift — it's noted at the top of
+> `claude-functions.ps1` too, so nobody "fixes" it later.
+
+## Adding your own
+
+- **Slash command:** drop a `.md` file in `global/commands/`.
+- **Agent:** drop a `.md` file in `global/agents/`.
+- **Workflow:** drop a `.js` file in `project-desktop/.claude/workflows/`.
+- **Secret:** add a `{name, purpose}` entry to `secrets.json`; `deploy.ps1` and `doctor.ps1`
+  start reporting on it automatically.
+- **A whole new file or folder to sync:** add an entry to `$fileMappings` or `$dirMappings` in
+  both `collect.ps1` and `deploy.ps1`.
+
+Then `/sync-config push`. Directory-based sets sync as a unit, so deleting a file locally
+removes it from the repo on the next collect, and vice versa on deploy — with a backup first.
+
+## What's in the repo
+
+| Path | |
+|---|---|
+| `bootstrap.ps1` | One-command install. Forks, clones, deploys, verifies. |
+| `deploy.ps1` | Repo → machine. `-DryRun` previews every change. |
+| `collect.ps1` | Machine → repo. |
+| `sync-config.ps1` | `push` / `pull` around the two above. |
+| `doctor.ps1` | Reports what actually works. Exits non-zero on failure. |
+| `restore.ps1` | Restores from `.backups\<timestamp>\`. |
+| `Set-Secret.ps1` / `Get-Secret.ps1` | Per-machine encrypted secret store. |
+| `apply-terminal-keybinding.ps1` | Adds the Shift+Enter binding to Windows Terminal. |
+| `claude-api.ps1` | Standalone API-mode launcher. |
+| `lib/Common.ps1` | Shared helpers: profile discovery, managed block, JSON validation. |
+| `System Prompt.txt` | The system prompt `claude-sp` loads. |
+| `global/` | → `%USERPROFILE%\.claude\` (settings, commands, agents, statusline). |
+| `project-desktop/` | → your Desktop (`CLAUDE.md`, project settings, workflows). |
+| `powershell/claude-functions.ps1` | → `~/.claude/`, sourced by both PowerShell profiles. |
+| `secrets.json` | Which secrets exist and what each unlocks. |
+
+The scripts run from the repo; `global/` and `project-desktop/` are what gets deployed.
+
+## Notes
+
+- **Both PowerShell editions are wired.** Windows PowerShell 5.1 and PowerShell 7 read
+  different profile paths. Deploy injects into both, so the functions exist in whichever shell
+  you open. `doctor.ps1` checks each one, and reports which shell Windows Terminal opens by
+  default.
+- **Repo `.ps1` files are pure ASCII, on purpose.** Windows PowerShell 5.1 reads a BOM-less
+  file as ANSI, so a stray em-dash decodes into a smart quote that PowerShell treats as a
+  string delimiter — fatal inside a double-quoted string. `doctor.ps1` enforces it. Markdown
+  is fine.
+- **Windows Terminal settings aren't synced.** That file holds machine-specific profile GUIDs.
+  `apply-terminal-keybinding.ps1` surgically adds two idempotent blocks to whatever local
+  `settings.json` exists, backing it up first.
