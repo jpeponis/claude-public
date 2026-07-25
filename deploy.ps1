@@ -1,4 +1,4 @@
-# deploy.ps1 — Deploy repo Claude Code config to local machine with username resolved
+# deploy.ps1 -- Deploy repo Claude Code config to local machine with username resolved
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File deploy.ps1
 #   powershell -ExecutionPolicy Bypass -File deploy.ps1 -DryRun    # preview, write nothing
@@ -30,7 +30,7 @@ function Say {
 # NOTE: ~/.claude/.*.enc secrets are NEVER deployed (DPAPI, per-user and per-machine).
 #       Missing ones are reported at the end; see secrets.json for the registry.
 # NOTE: The PowerShell profile is NOT in this list. Profiles are wired up additively
-#       by Add-ClaudeProfileBlock below — see the profile section for why.
+#       by Add-ClaudeProfileBlock below -- see the profile section for why.
 $fileMappings = @(
     @{ Source = "global\settings.json";                        Dest = "$claudeHome\settings.json" }
     @{ Source = "global\statusline-command.ps1";               Dest = "$claudeHome\statusline-command.ps1" }
@@ -223,7 +223,7 @@ if (Test-Path $wtScript) {
 
 Write-Host ""
 if ($DryRun) {
-    Write-Host "Dry run complete — nothing was written. Re-run without -DryRun to apply." -ForegroundColor Yellow
+    Write-Host "Dry run complete -- nothing was written. Re-run without -DryRun to apply." -ForegroundColor Yellow
 } else {
     Write-Host "Restart Claude Code, and open a NEW terminal tab, for changes to take effect." -ForegroundColor Cyan
     Write-Host "Verify with: powershell -ExecutionPolicy Bypass -File `"$repoRoot\doctor.ps1`"" -ForegroundColor Cyan

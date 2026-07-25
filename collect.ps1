@@ -1,4 +1,4 @@
-# collect.ps1 — Collect local Claude Code config into repo with username parameterized
+# collect.ps1 -- Collect local Claude Code config into repo with username parameterized
 # Usage: powershell -ExecutionPolicy Bypass -File collect.ps1
 
 $ErrorActionPreference = "Stop"
@@ -10,14 +10,14 @@ $desktopDir = Join-Path $env:USERPROFILE "Desktop"
 
 # --- Individual file mappings ---
 # NOTE: Repo-native files ("System Prompt.txt", lib\, and the launcher / doctor / restore /
-#       publish scripts) live in the repo — no collect needed.
+#       publish scripts) live in the repo -- no collect needed.
 # NOTE: ~/.claude/.*.enc secrets are NEVER collected (sensitive, DPAPI-encrypted,
 #       machine-specific). The allowlist below excludes them structurally; the registry
 #       of expected secret names lives in secrets.json.
 # NOTE: The PowerShell profile is deliberately NOT collected. The shell functions live in
 #       claude-functions.ps1, which each profile dot-sources via a managed block that
 #       deploy.ps1 injects. Collecting a whole profile would drag in whatever unrelated
-#       shell config the user keeps there — and would only ever capture one of the two
+#       shell config the user keeps there -- and would only ever capture one of the two
 #       profile paths (5.1 vs 7+).
 $fileMappings = @(
     @{ Source = "$claudeHome\settings.json";              Dest = "global\settings.json" }

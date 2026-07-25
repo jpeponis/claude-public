@@ -12,7 +12,7 @@
   Logical secret name. Produces ~/.claude/.<Name>.enc  (e.g. 'api-key', 'github-token').
 
 .PARAMETER Value
-  Optional. The secret value. OMIT THIS for interactive use — you'll get a hidden secure
+  Optional. The secret value. OMIT THIS for interactive use -- you'll get a hidden secure
   prompt so the secret never lands in your shell history. Pass -Value only for automation.
 
 .EXAMPLE
@@ -38,6 +38,6 @@ if ($PSBoundParameters.ContainsKey('Value') -and $Value) {
 }
 if ($null -eq $secure -or $secure.Length -eq 0) { Write-Error 'Empty secret; aborting.'; exit 1 }
 
-# DPAPI (CurrentUser) — identical scheme to .api-key.enc
+# DPAPI (CurrentUser) -- identical scheme to .api-key.enc
 $secure | ConvertFrom-SecureString | Set-Content -Path $path
 Write-Host "Encrypted -> $path" -ForegroundColor Green

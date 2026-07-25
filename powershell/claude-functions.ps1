@@ -1,4 +1,4 @@
-# claude-functions.ps1 — Claude Code shell functions.
+# claude-functions.ps1 -- Claude Code shell functions.
 #
 # Deployed to ~/.claude/claude-functions.ps1 and dot-sourced by a small managed block
 # that deploy.ps1 injects into BOTH PowerShell profiles:

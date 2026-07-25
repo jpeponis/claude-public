@@ -1,4 +1,4 @@
-# sync-config.ps1 — Unified push/pull for Claude Code config repo
+# sync-config.ps1 -- Unified push/pull for Claude Code config repo
 # Usage:
 #   sync-config.ps1 pull                  Pull from remote and deploy to local machine
 #   sync-config.ps1 pull -DryRun          Pull, then preview the deploy without writing anything
@@ -43,10 +43,20 @@ function Invoke-Pull {
         exit 1
     }
 
-    # Deploy. -DryRun previews every local write without performing any — worth using
+    # Deploy. -DryRun previews every local write without performing any -- worth using
     # on a machine whose existing config you have not inspected yet.
     Write-Host ""
     & (Join-Path $repoRoot "deploy.ps1") -DryRun:$DryRun
+
+    # Then report actual state. deploy.ps1 can only tell you what it wrote; doctor.ps1
+    # checks what is true afterwards, which is where silent mismatches show up.
+    if (-not $DryRun) {
+        $doctor = Join-Path $repoRoot "doctor.ps1"
+        if (Test-Path $doctor) {
+            Write-Host ""
+            & $doctor
+        }
+    }
 }
 
 function Invoke-Push {
@@ -86,7 +96,7 @@ function Invoke-Push {
 
     if ($DryRun) {
         Write-Host "Dry run complete. Run without -DryRun to commit and push." -ForegroundColor Yellow
-        # Unstage only — leave working tree as-is (next push re-collects anyway)
+        # Unstage only -- leave working tree as-is (next push re-collects anyway)
         git -C $repoRoot reset HEAD -- . 2>&1 | Out-Null
         exit 0
     }
