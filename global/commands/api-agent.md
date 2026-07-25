@@ -9,7 +9,7 @@ Run a prompt through a separate Claude Code process billed to the Anthropic API 
 - `--1m` : Use the 1M token extended context window (appends `[1m]` to the model)
 - `--sp` : Include the custom system prompt from `$env:USERPROFILE\Desktop\claude-config\System Prompt.txt`
 - `--spsp` : Include the custom system prompt AND skip all permission prompts
-- `--model <name>` : Override the model (default: claude-opus-4-6). Combine with `--1m` for extended context.
+- `--model <name>` : Override the model (default: opus, an alias that always resolves to the current Opus). Combine with `--1m` for extended context.
 
 ## Behavior
 
@@ -21,7 +21,7 @@ Run a prompt through a separate Claude Code process billed to the Anthropic API 
 
 2. **Build the claude command** based on the options:
    - Base: `claude -p "<prompt>"`
-   - If `--1m`: add `--model claude-opus-4-6[1m]` (or `--model <name>[1m]` if `--model` was specified)
+   - If `--1m`: add `--model opus[1m]` (or `--model <name>[1m]` if `--model` was specified)
    - If `--model` without `--1m`: add `--model <name>`
    - If `--sp` or `--spsp`: add `--append-system-prompt "$(Get-Content "$env:USERPROFILE\Desktop\claude-config\System Prompt.txt" -Raw)"`
    - If `--spsp`: also add `--dangerously-skip-permissions --permission-mode dontAsk`

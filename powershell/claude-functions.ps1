@@ -33,12 +33,11 @@ function claude-spsp {
 
 # --- API-mode functions (pay-as-you-go billing, enables 1M context) ---
 
+# Delegates to Get-Secret.ps1 rather than repeating its two lines, which is how the
+# github-token loader above already does it. Three separate copies of this decrypt
+# existed; a store none of them could read still reported as present everywhere.
 function Get-AnthropicApiKey {
-    $encrypted = Get-Content "$env:USERPROFILE\.claude\.api-key.enc"
-    $secure = $encrypted | ConvertTo-SecureString
-    return [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    )
+    return & "$env:USERPROFILE\Desktop\claude-config\Get-Secret.ps1" -Name api-key
 }
 
 function claude-api {

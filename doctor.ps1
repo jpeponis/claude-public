@@ -209,13 +209,23 @@ $registryPath = Join-Path $repoRoot "secrets.json"
 if (-not (Test-Path $registryPath)) {
     Check WARN "secrets.json not found in repo"
 } else {
+    # Present is not the same as readable. A file written by an older scheme, or by a
+    # different Windows user or machine, sits there looking fine and fails at the
+    # moment something needs it -- which is a launcher failing, not a warning. So
+    # decrypt each one for real and report what actually happens.
     try {
         foreach ($sec in @((Get-Content $registryPath -Raw | ConvertFrom-Json).secrets)) {
             $encPath = Join-Path $claudeHome ".$($sec.name).enc"
-            if (Test-Path $encPath) {
-                Check OK "$($sec.name) present"
-            } else {
+            if (-not (Test-Path $encPath)) {
                 Check WARN "$($sec.name) absent -- $($sec.purpose)" "& `"$repoRoot\Set-Secret.ps1`" -Name $($sec.name)"
+                continue
+            }
+            $value = $null
+            try { $value = & (Join-Path $repoRoot "Get-Secret.ps1") -Name $sec.name 2>$null } catch { }
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                Check FAIL "$($sec.name) present but cannot be decrypted -- $($sec.purpose)" "re-encrypt it on this machine: & `"$repoRoot\Set-Secret.ps1`" -Name $($sec.name)"
+            } else {
+                Check OK "$($sec.name) present and decrypts"
             }
         }
     } catch {
