@@ -96,8 +96,18 @@ function Invoke-Push {
 
     if ($DryRun) {
         Write-Host "Dry run complete. Run without -DryRun to commit and push." -ForegroundColor Yellow
-        # Unstage only -- leave working tree as-is (next push re-collects anyway)
-        git -C $repoRoot reset HEAD -- . 2>&1 | Out-Null
+        # Unstage only -- leave working tree as-is (next push re-collects anyway).
+        #
+        # Redirecting a native command's stderr turns each line into a PowerShell error
+        # record, and with $ErrorActionPreference = 'Stop' (set at the top of this file)
+        # that record is TERMINATING. Every redirection form does it -- '2>&1 | Out-Null',
+        # '2>$null', and '(& cmd) 2>$null' all throw; only leaving stderr alone is safe.
+        # So any message git chose to write here would abort the dry run one line before
+        # its clean exit. Relax the preference for exactly this call.
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { git -C $repoRoot reset HEAD -- . 2>&1 | Out-Null }
+        finally { $ErrorActionPreference = $previousEap }
         exit 0
     }
 
