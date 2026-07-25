@@ -21,7 +21,7 @@ $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $repoRoot "lib\Common.ps1")
 
 $claudeHome = Join-Path $env:USERPROFILE ".claude"
-$desktopDir = Join-Path $env:USERPROFILE "Desktop"
+$desktopDir = Get-DesktopPath
 
 $script:fails = 0
 $script:warns = 0

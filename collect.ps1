@@ -3,10 +3,12 @@
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $repoRoot "lib\Common.ps1")
+
 $username = $env:USERNAME
 $escapedUsername = [regex]::Escape($username)
 $claudeHome = Join-Path $env:USERPROFILE ".claude"
-$desktopDir = Join-Path $env:USERPROFILE "Desktop"
+$desktopDir = Get-DesktopPath
 
 # --- Individual file mappings ---
 # NOTE: Repo-native files ("System Prompt.txt", lib\, and the launcher / doctor / restore /
