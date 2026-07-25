@@ -12,7 +12,7 @@ $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $username   = $env:USERNAME
 $claudeHome = Join-Path $env:USERPROFILE ".claude"
-$desktopDir = Join-Path $env:USERPROFILE "Desktop"
+$desktopDir = Get-DesktopPath
 
 # Files this script has deployed before. Pruning is limited to this list so a
 # user's own skills/agents are never deleted just for being unknown to the repo.

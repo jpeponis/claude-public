@@ -15,6 +15,22 @@ function Write-TextFile {
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+# --- Desktop, resolved the same way Documents is -----------------------------
+# "$env:USERPROFILE\Desktop" is wrong on any machine with OneDrive Known Folder Move
+# enabled, which is the Windows 11 default on a consumer setup: the real Desktop is
+# then "$env:USERPROFILE\OneDrive\Desktop" and the literal path either does not exist
+# or is a stale leftover. deploy.ps1 puts CLAUDE.md and .claude\settings.local.json
+# there, so getting this wrong writes project config to a directory the user never
+# opens -- the same silent-success failure the profile paths had.
+#
+# bootstrap.ps1 deliberately repeats this logic inline rather than calling it: it runs
+# before the repo exists, so it cannot dot-source this file.
+function Get-DesktopPath {
+    $d = [Environment]::GetFolderPath('Desktop')
+    if ($d) { return $d }
+    return (Join-Path $env:USERPROFILE 'Desktop')
+}
+
 # --- PowerShell profile discovery -------------------------------------------
 # Windows PowerShell 5.1 reads Documents\WindowsPowerShell\, PowerShell 7+ reads
 # Documents\PowerShell\. Both must be wired up or the claude-* functions exist in
