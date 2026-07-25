@@ -31,6 +31,12 @@ A template for syncing Claude Code settings, agents, slash commands, and dynamic
 - `Set-Secret.ps1` / `Get-Secret.ps1` — Per-machine encrypted secret store (repo-native).
   Secrets are DPAPI-encrypted to `%USERPROFILE%\.claude\.<name>.enc` (current user, current
   machine only) and are never collected or deployed; `deploy.ps1` reports missing ones.
+- `doctor.ps1` — Repo-native. Checks what is actually true on your machine after a deploy and
+  prints a pass/warn/fail line per item, each failure paired with the command that fixes it.
+  Run it any time you are not sure the setup took. `deploy.ps1` can only report what it *wrote*;
+  this reports what *works* — the distinction matters, because a file can be written correctly to
+  a location nothing reads. Exits non-zero if anything failed. `sync-config.ps1 pull` runs it
+  automatically.
 - `System Prompt.txt` — Custom system prompt (repo-native, not collected/deployed)
 - `claude-api.ps1` — Standalone API-mode launcher (repo-native)
 - `apply-terminal-keybinding.ps1` — Repo-native; injects a Shift+Enter→newline action into the
@@ -88,11 +94,18 @@ Settings files contain hardcoded Windows paths like `C:\Users\<name>\...`. Since
    powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Desktop\claude-config\deploy.ps1"
    ```
 
-5. Restart Claude Code and verify:
-   - Settings load correctly (model, permissions)
-   - The `/sync-config` and `/api-agent` slash commands appear
-   - The file-manager agent is available
-   - The GitHub MCP plugin connects (try asking Claude a GitHub-related question)
+5. Verify the install:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Desktop\claude-config\doctor.ps1"
+   ```
+   You want `all checks passed`. Warnings are usually fine — an optional secret you skipped, or
+   Windows Terminal not being installed. Failures come with the command that fixes them.
+
+6. **Open a new terminal tab**, then restart Claude Code. The shell functions only exist in shells
+   started after the deploy, and Claude Code reads its settings at launch. Then try:
+   - `claude-sp` — the main way in (see "Start here" below)
+   - `/sync-config` and `/api-agent` should appear in the slash-command list
+   - the `file-manager` agent should be available
 
 ## Ongoing Usage
 

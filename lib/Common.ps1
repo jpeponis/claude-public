@@ -1,4 +1,4 @@
-# lib/Common.ps1 — Shared helpers, dot-sourced by deploy.ps1, doctor.ps1,
+# lib/Common.ps1 -- Shared helpers, dot-sourced by deploy.ps1, doctor.ps1,
 # restore.ps1 and apply-terminal-keybinding.ps1.
 #
 # Dot-source with:  . (Join-Path $repoRoot "lib\Common.ps1")
@@ -50,10 +50,17 @@ function Get-ProfilePaths {
 # --- Managed block injected into each profile -------------------------------
 # The functions live in one synced file; each profile only gets a dot-source line.
 # That keeps the install additive: a user's existing profile is never rewritten.
+#
+# Detection deliberately matches only the stable prefix, not the whole start line.
+# The trailing text has already changed once (an em-dash became '--' when these scripts
+# were made pure ASCII), and blocks written by the older version are still out there in
+# real profiles. Matching the prefix means an existing block is recognised and REPLACED
+# rather than missed and duplicated.
 function Get-ClaudeBlockMarkers {
     @{
-        Start = '# --- Claude Code config (managed block) — do not edit inside ---'
-        End   = '# --- end Claude Code config ---'
+        Start         = '# --- Claude Code config (managed block) -- do not edit inside ---'
+        End           = '# --- end Claude Code config ---'
+        DetectPattern = [regex]::Escape('# --- Claude Code config (managed block)')
     }
 }
 
@@ -71,7 +78,7 @@ function Test-ClaudeProfileBlock {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
     $m = Get-ClaudeBlockMarkers
-    return (Get-Content $Path -Raw -Encoding UTF8) -match [regex]::Escape($m.Start)
+    return (Get-Content $Path -Raw -Encoding UTF8) -match $m.DetectPattern
 }
 
 # Idempotent: appends the block if absent, replaces it in place if present but stale,
@@ -88,7 +95,7 @@ function Add-ClaudeProfileBlock {
     $block = Get-ClaudeProfileBlock
     $existing = if (Test-Path $Path) { Get-Content $Path -Raw -Encoding UTF8 } else { '' }
 
-    $rx = [regex]("(?s)" + [regex]::Escape($m.Start) + ".*?" + [regex]::Escape($m.End))
+    $rx = [regex]("(?s)" + $m.DetectPattern + ".*?" + [regex]::Escape($m.End))
     $hasBlock = $rx.IsMatch($existing)
 
     if ($hasBlock) {
@@ -134,13 +141,35 @@ function Get-TerminalSettingsPaths {
 }
 
 # Validate JSON, tolerating comments and trailing commas the way Windows Terminal does.
+#
+# System.Text.Json is the clean way to do this, but it does NOT exist on Windows
+# PowerShell 5.1 (.NET Framework 4.x ships it only as an optional NuGet package).
+# Without the type check below, the type lookup threw, the catch swallowed it, and this
+# returned $false for EVERY input under 5.1 -- which made doctor.ps1 report perfectly
+# good settings files as corrupt, and made apply-terminal-keybinding.ps1 refuse to add
+# the Shift+Enter binding while blaming "unexpected structure".
 function Test-JsonValid {
     param([string]$Json)
+
+    if ('System.Text.Json.JsonDocument' -as [type]) {
+        try {
+            $opts = [System.Text.Json.JsonDocumentOptions]::new()
+            $opts.CommentHandling = [System.Text.Json.JsonCommentHandling]::Skip
+            $opts.AllowTrailingCommas = $true
+            [void][System.Text.Json.JsonDocument]::Parse($Json, $opts)
+            return $true
+        } catch {
+            return $false
+        }
+    }
+
+    # 5.1 fallback: ConvertFrom-Json rejects comments and trailing commas, so strip both
+    # first. The comment pattern is anchored to the start of a line, so a "//" inside a
+    # string (a URL, say) is left alone.
     try {
-        $opts = [System.Text.Json.JsonDocumentOptions]::new()
-        $opts.CommentHandling = [System.Text.Json.JsonCommentHandling]::Skip
-        $opts.AllowTrailingCommas = $true
-        [void][System.Text.Json.JsonDocument]::Parse($Json, $opts)
+        $stripped = [regex]::Replace($Json,     '(?m)^\s*//.*$', '')
+        $stripped = [regex]::Replace($stripped, ',(\s*[}\]])',   '$1')
+        [void]($stripped | ConvertFrom-Json)
         return $true
     } catch {
         return $false
