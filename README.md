@@ -16,7 +16,10 @@ setup — feel free to fork, adapt, and add your own skills, agents, and workflo
     eat the main context; research-worker, the minimal-context worker used by
     deep-research-tiered)
   - `commands/` — Slash commands (sync-config, api-agent)
-- `project-desktop/` — Maps to `%USERPROFILE%\Desktop\` (project-level config)
+- `project-desktop/` — Maps to your Desktop (project-level config). Resolved with
+  `[Environment]::GetFolderPath('Desktop')` rather than `%USERPROFILE%\Desktop`, so it still
+  lands in the right place when OneDrive Known Folder Move has redirected Desktop — which is
+  the default on a consumer Windows 11 setup
   - `CLAUDE.md` — Project instructions
   - `.claude/settings.local.json` — Project-local settings
   - `.claude/workflows/` — Dynamic workflow scripts (`*.js`, e.g. deep-research-tiered)
@@ -32,7 +35,9 @@ setup — feel free to fork, adapt, and add your own skills, agents, and workflo
   Secrets are DPAPI-encrypted to `%USERPROFILE%\.claude\.<name>.enc` (current user, current
   machine only) and are never collected or deployed; `deploy.ps1` warns about missing ones.
 - `secrets.json` — Registry of which secrets exist and what each one unlocks
-- `lib/Common.ps1` — Shared helpers: profile discovery, managed-block injection, JSON validation
+- `lib/Common.ps1` — Shared helpers: the sync plan (what gets synced, declared once and read by
+  collect, deploy and doctor), username substitution, profile discovery, managed-block
+  injection, backup enumeration, JSON validation
 - `System Prompt.txt` — Custom system prompt (repo-native, not collected/deployed)
 - `claude-api.ps1` — Standalone API-mode launcher (repo-native)
 - `apply-terminal-keybinding.ps1` — Repo-native; injects a Shift+Enter→newline action into the
@@ -221,14 +226,29 @@ One note (noted at the top of `claude-functions.ps1` as well): `claude-sp` uses
 ```
 
 `doctor.ps1` reports what is actually true on this machine: Claude Code and Node versions,
-settings that parse, every command and agent the repo ships being present, the statusline
-actually executing, both PowerShell profiles wired up, the Shift+Enter binding, and secrets that
-actually decrypt. Each failure prints the command that fixes it, and the script exits non-zero if
-anything failed. `/sync-config pull` runs it automatically.
+settings that parse, every command and agent the repo ships being present, every deployed file
+still *matching* the repo, the statusline actually executing, both PowerShell profiles wired up,
+the Shift+Enter binding, and secrets that actually decrypt. Each failure prints the command that
+fixes it, and the script exits non-zero if anything failed. `/sync-config pull` runs it
+automatically and passes its exit code through.
 
 It exists because `deploy.ps1` can only report what it *wrote*, which can be entirely true while
 the outcome is still wrong — a file written perfectly to a location nothing reads is the
 motivating case.
+
+The match check earns its place for a quieter reason: editing `~/.claude/commands/foo.md`
+directly is a perfectly normal way to work on a skill, and nothing otherwise tells you the repo
+now disagrees — until a later deploy overwrites the edit. It warns rather than fails, because
+either direction can be the right one: `collect.ps1` keeps the local version, `deploy.ps1` takes
+the repo's.
+
+To see what a deploy would change without changing anything:
+
+```powershell
+.\deploy.ps1 -DryRun
+```
+
+It prints every write, deletion, profile edit and environment change, and performs none of them.
 
 ```powershell
 .\restore.ps1                 # list what can be restored
@@ -239,7 +259,8 @@ motivating case.
 Every deploy first backs up what it is about to overwrite into `.backups\<timestamp>\`, with a
 manifest recording where each file came from, so `restore.ps1` puts files back exactly there
 instead of inferring it. Files that already match are skipped, so recovering one bad file
-rewrites only that file.
+rewrites only that file. Deploy keeps the newest 20 backup directories and deletes older ones;
+pass `-KeepBackups <n>` to change that.
 
 `deploy.ps1` is additive by design. It adds a small marked block to your PowerShell profiles
 rather than replacing them, and it only ever deletes files it previously deployed itself
@@ -260,7 +281,7 @@ automatically, so `/sync-config pull` applies it on every machine.
 ## Dynamic Workflows
 
 [Dynamic workflows](https://docs.claude.com/en/docs/claude-code/) are `*.js` scripts under
-`%USERPROFILE%\Desktop\.claude\workflows\` that orchestrate multiple subagents deterministically.
+`<Desktop>\.claude\workflows\` that orchestrate multiple subagents deterministically.
 They are synced as a unit (every `*.js` file in that folder), the same way agents and slash
 commands are. The included `deep-research-tiered.js` is a sample: the session model decomposes the
 question into search angles and key assertions, worker-model agents fan out to search and fetch
@@ -285,13 +306,13 @@ To add a new **slash command**, drop a `.md` file in `global/commands/`. For a n
 `project-desktop/.claude/workflows/`. For a new **secret**, add a `{name, purpose}` entry to
 `secrets.json`; `deploy.ps1` and `doctor.ps1` then report on it automatically.
 
-To add a new **individual file**: edit `collect.ps1` and `deploy.ps1` and add an entry to the
-`$fileMappings` array.
+To sync something the repo does not already handle, add one entry to `Get-SyncPlan` in
+`lib/Common.ps1` — `Files` for an individual file, `Dirs` for a whole folder with a `Filter`
+(e.g. `*.md` or `*.js`). That single list is what `collect.ps1`, `deploy.ps1` and `doctor.ps1`
+all read, so one entry teaches all three.
 
-To add a new **folder of files** (like agents, commands, or workflows): add an entry to the
-`$dirMappings` array with a `Filter` (e.g. `*.md` or `*.js`). All matching files in the folder are
-synced as a unit, and files deleted locally are removed from the repo on the next collect (and
-vice-versa on deploy, with a backup first).
+Folders sync as a unit in both directions: a file deleted locally leaves the repo on the next
+collect, and a file deleted from the repo is pruned locally on the next deploy (after a backup).
 
 Then run `collect.ps1` to bring the file(s) into the repo, and commit and push — or just
 `/sync-config push`, which does all three.
@@ -305,3 +326,8 @@ Then run `collect.ps1` to bring the file(s) into the repo, and commit and push �
 - **Repo `.ps1` files are pure ASCII, on purpose.** Windows PowerShell 5.1 reads a BOM-less file
   as ANSI, so a stray em-dash decodes into a smart quote that PowerShell treats as a string
   delimiter — fatal inside a double-quoted string. `doctor.ps1` enforces it. Markdown is fine.
+- **What gets synced is declared once.** `collect.ps1` (local → repo), `deploy.ps1` (repo →
+  local) and `doctor.ps1` ("did it actually arrive, and does it still match?") all need the same
+  list, and it used to be written out three times. Two copies drifting is a bug you notice; the
+  third was doctor's, where a missing entry is invisible — doctor simply stops checking that
+  file and keeps printing green. The list now lives in `Get-SyncPlan`.

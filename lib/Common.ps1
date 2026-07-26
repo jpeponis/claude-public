@@ -1,5 +1,5 @@
-# lib/Common.ps1 -- Shared helpers, dot-sourced by deploy.ps1, doctor.ps1,
-# restore.ps1 and apply-terminal-keybinding.ps1.
+# lib/Common.ps1 -- Shared helpers, dot-sourced by collect.ps1, deploy.ps1, doctor.ps1,
+# restore.ps1, publish.ps1 and apply-terminal-keybinding.ps1.
 #
 # Dot-source with:  . (Join-Path $repoRoot "lib\Common.ps1")
 #
@@ -29,6 +29,84 @@ function Get-DesktopPath {
     $d = [Environment]::GetFolderPath('Desktop')
     if ($d) { return $d }
     return (Join-Path $env:USERPROFILE 'Desktop')
+}
+
+# --- What this repo syncs: ONE description, three consumers ------------------
+# collect.ps1 (local -> repo), deploy.ps1 (repo -> local) and doctor.ps1 (is it
+# actually there?) all need the same list. It used to be written out three times.
+# Two copies drifting is a bug you notice; the third was doctor's, and a mapping
+# missing from THAT one is invisible -- doctor simply stops checking a file and
+# keeps printing green. So the list lives here, and adding a mapping teaches all
+# three scripts at once.
+#
+# Deliberately NOT in this plan, each for a reason worth keeping:
+#   - The PowerShell profile. Collecting a whole profile drags in unrelated shell
+#     config and can only ever capture one of the two profile paths (5.1 vs 7+).
+#     The functions live in claude-functions.ps1; profiles get a managed block
+#     that dot-sources it (see Add-ClaudeProfileBlock).
+#   - ~/.claude/.*.enc secrets. DPAPI-bound to one user on one machine, so they
+#     cannot travel. secrets.json registers the names; each machine runs Set-Secret.ps1.
+#   - Repo-native scripts ("System Prompt.txt", lib\, and the launcher / doctor /
+#     restore / publish scripts). They are run FROM the repo, not deployed.
+function Get-SyncPlan {
+    param(
+        [Parameter(Mandatory)][string]$ClaudeHome,
+        [Parameter(Mandatory)][string]$DesktopDir
+    )
+    @{
+        # Repo path (relative to repo root) <-> absolute local path.
+        Files = @(
+            @{ Repo = 'global\settings.json';                        Local = "$ClaudeHome\settings.json" }
+            @{ Repo = 'global\statusline-command.ps1';               Local = "$ClaudeHome\statusline-command.ps1" }
+            @{ Repo = 'powershell\claude-functions.ps1';             Local = "$ClaudeHome\claude-functions.ps1" }
+            @{ Repo = 'project-desktop\CLAUDE.md';                   Local = "$DesktopDir\CLAUDE.md" }
+            @{ Repo = 'project-desktop\.claude\settings.local.json'; Local = "$DesktopDir\.claude\settings.local.json" }
+        )
+        # Every file matching Filter is synced as a unit, in both directions:
+        # deleting one locally removes it from the repo on the next collect, and
+        # deleting it from the repo prunes it locally on the next deploy.
+        Dirs = @(
+            @{ Name = 'commands';  Repo = 'global\commands'; Local = "$ClaudeHome\commands"; Filter = '*.md' }
+            @{ Name = 'agents';    Repo = 'global\agents';   Local = "$ClaudeHome\agents";   Filter = '*.md' }
+            @{ Name = 'workflows'; Repo = 'project-desktop\.claude\workflows'; Local = "$DesktopDir\.claude\workflows"; Filter = '*.js' }
+        )
+    }
+}
+
+# The repo stores the username as {{USERNAME}} so one repo serves every machine.
+# String.Replace, not -replace: the token's casing is fixed, and a regex
+# replacement would give special meaning to '$' in the username.
+function Expand-UserName {
+    param([string]$Text, [string]$UserName)
+    return $Text.Replace('{{USERNAME}}', $UserName)
+}
+
+# --- secrets.json, read the same way by deploy.ps1 and doctor.ps1 ------------
+# Returns the registry entries, or $null when the file is absent. Invalid JSON
+# THROWS rather than returning empty: silently checking zero secrets is how a
+# store that nothing can read still reports as fine.
+function Get-SecretsRegistry {
+    param([Parameter(Mandatory)][string]$RepoRoot)
+    $path = Join-Path $RepoRoot 'secrets.json'
+    if (-not (Test-Path $path)) { return $null }
+    return @((Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json).secrets)
+}
+
+# --- .backups\ --------------------------------------------------------------
+# deploy.ps1 names its backup directories with a sortable timestamp. Anything
+# else under .backups\ belongs to something else -- apply-terminal-keybinding.ps1
+# keeps its own snapshots in .backups\terminal\ -- and must not be mistaken for a
+# deploy backup. Name-sorting alone does not separate them: 'terminal' sorts
+# ABOVE every digit, so restore.ps1 -Latest used to announce it as a newer backup
+# it was skipping, on every single run.
+# Newest first; the stamp format sorts chronologically as text.
+function Get-BackupDirs {
+    param([Parameter(Mandatory)][string]$RepoRoot)
+    $root = Join-Path $RepoRoot '.backups'
+    if (-not (Test-Path $root)) { return @() }
+    return @(Get-ChildItem $root -Directory |
+        Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}_\d{6}$' } |
+        Sort-Object Name -Descending)
 }
 
 # --- PowerShell profile discovery -------------------------------------------
