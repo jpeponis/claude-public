@@ -48,11 +48,8 @@ if ($Latest -and $Timestamp)      { Fail "Use -Latest or -Timestamp <stamp>, not
 if ($List -and $restoring)        { Fail "-List cannot be combined with -Latest or -Timestamp." }
 if ($DryRun -and -not $restoring) { Fail "-DryRun previews a restore; pair it with -Latest or -Timestamp <stamp>." }
 
-# --- Enumerate backups (stamp names are zero-padded, so name order = age order) ---
-$dirs = @()
-if (Test-Path $backupsRoot) {
-    $dirs = @(Get-ChildItem $backupsRoot -Directory | Sort-Object Name -Descending)
-}
+# --- Enumerate backups (newest first; see Get-BackupDirs for why it filters) ---
+$dirs = @(Get-BackupDirs -RepoRoot $repoRoot)
 
 if ($dirs.Count -eq 0) {
     if ($restoring) { Fail "No backups found in $backupsRoot -- nothing to restore." }

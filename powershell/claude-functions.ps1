@@ -19,8 +19,11 @@
 # GetFolderPath('Desktop'), not "$env:USERPROFILE\Desktop": OneDrive Known Folder
 # Move redirects Desktop on a default Windows 11 consumer setup, so the literal path
 # is either missing or a stale leftover -- and claude-sp would go looking for the
-# system prompt in a directory that does not exist. codex-sp below already resolved
-# Desktop this way; nothing else in this file did.
+# system prompt in a directory that does not exist.
+#
+# Every function below routes through this one, so the repo's location is decided in
+# exactly one place. codex-sp used to resolve Desktop itself, which is how the two
+# could have disagreed.
 #
 # This assumes the repo sits at <Desktop>\claude-config, which is where bootstrap.ps1
 # and the README put it. Installing anywhere else (bootstrap.ps1 -Dest) would need
@@ -76,8 +79,7 @@ function claude-api-spsp {
 function codex-sp {
     $codexArgs = @($args)
 
-    $desktopPath = [Environment]::GetFolderPath('Desktop')
-    $promptPath = Join-Path $desktopPath 'claude-config\System Prompt.txt'
+    $promptPath = Get-ClaudeConfigPath "System Prompt.txt"
 
     if (-not (Test-Path -LiteralPath $promptPath -PathType Leaf)) {
         Write-Error "Prompt file not found: $promptPath"

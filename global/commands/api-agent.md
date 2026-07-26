@@ -7,23 +7,28 @@ Run a prompt through a separate Claude Code process billed to the Anthropic API 
 
 ## Options
 - `--1m` : Use the 1M token extended context window (appends `[1m]` to the model)
-- `--sp` : Include the custom system prompt from `$env:USERPROFILE\Desktop\claude-config\System Prompt.txt`
+- `--sp` : Include the custom system prompt from `$HOME/Desktop/claude-config/System Prompt.txt`
 - `--spsp` : Include the custom system prompt AND skip all permission prompts
 - `--model <name>` : Override the model (default: opus, an alias that always resolves to the current Opus). Combine with `--1m` for extended context.
 
 ## Behavior
 
-1. **Retrieve the API key** by running this PowerShell command via Bash:
+1. **Retrieve the API key** with the repo's one decrypt path, `Get-Secret.ps1`:
    ```
-   powershell -Command "& { $encrypted = Get-Content \"$env:USERPROFILE\.claude\.api-key.enc\"; $secure = $encrypted | ConvertTo-SecureString; [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)) }"
+   powershell -ExecutionPolicy Bypass -File "$HOME/Desktop/claude-config/Get-Secret.ps1" -Name api-key
    ```
    Store the result (the API key) for the next step. Do NOT display it to the user.
+
+   Do not inline the DPAPI decrypt here instead. Every other caller (`claude-functions.ps1`,
+   `claude-api.ps1`, `stripe-api.ps1`, `doctor.ps1`) goes through `Get-Secret.ps1`, so a store
+   written in a format one copy cannot read gets reported by `doctor.ps1` rather than failing
+   in only this skill.
 
 2. **Build the claude command** based on the options:
    - Base: `claude -p "<prompt>"`
    - If `--1m`: add `--model opus[1m]` (or `--model <name>[1m]` if `--model` was specified)
    - If `--model` without `--1m`: add `--model <name>`
-   - If `--sp` or `--spsp`: add `--append-system-prompt "$(Get-Content "$env:USERPROFILE\Desktop\claude-config\System Prompt.txt" -Raw)"`
+   - If `--sp` or `--spsp`: add `--append-system-prompt "$(cat "$HOME/Desktop/claude-config/System Prompt.txt")"` — bash syntax, because step 3 runs the command through Bash; a PowerShell `$(Get-Content ...)` substitution there is not evaluated by the shell that runs it
    - If `--spsp`: also add `--dangerously-skip-permissions --permission-mode dontAsk`
 
 3. **Execute** the command via Bash with `ANTHROPIC_API_KEY=<key>` set as a prefix environment variable:

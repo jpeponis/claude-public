@@ -50,11 +50,15 @@ function Invoke-Pull {
 
     # Then report actual state. deploy.ps1 can only tell you what it wrote; doctor.ps1
     # checks what is true afterwards, which is where silent mismatches show up.
+    #
+    # Its exit code is passed through: a pull that leaves the machine in a broken state
+    # should not report success to whatever ran it (the /sync-config skill, or a script).
     if (-not $DryRun) {
         $doctor = Join-Path $repoRoot "doctor.ps1"
         if (Test-Path $doctor) {
             Write-Host ""
             & $doctor
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
     }
 }

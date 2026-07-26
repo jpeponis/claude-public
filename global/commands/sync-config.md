@@ -6,7 +6,9 @@ Keeps Claude Code settings, skills, agents, and shell profile in sync across mac
 /sync-config [push|pull]
 
 ## What gets synced
-Settings, skills (`commands/*.md`), agents (`agents/*.md`), project CLAUDE.md, PowerShell profile, statusline script. Sensitive files (API keys, OAuth tokens) are excluded. Username is parameterized (`{{USERNAME}}`) so the repo is machine-portable.
+Settings, skills (`commands/*.md`), agents (`agents/*.md`), workflows (`.claude/workflows/*.js`), project CLAUDE.md, statusline script, and the shell functions file.
+
+**Not** the PowerShell profile: deploy adds a small managed block to each profile that dot-sources `~/.claude/claude-functions.ps1`, and never rewrites anything else in it. Sensitive files (API keys, OAuth tokens) are excluded — they are DPAPI-encrypted per machine. Username is parameterized (`{{USERNAME}}`) so the repo is machine-portable.
 
 ## Behavior
 
@@ -34,7 +36,7 @@ powershell.exe -ExecutionPolicy Bypass -File "$HOME/Desktop/claude-config/sync-c
 If no argument is provided, default to **pull**.
 
 ## Troubleshooting
-- **git push/pull auth fails**: Git credential manager handles auth. Run `git -C "$HOME/Desktop/claude-config" push origin main` manually to diagnose. On a new machine, clone the repo first: `git clone https://github.com/{{USERNAME}}/claude.git "$HOME/Desktop/claude-config"`.
+- **git push/pull auth fails**: Git credential manager handles auth. Run `git -C "$HOME/Desktop/claude-config" push origin main` manually to diagnose. On a new machine the repo must be cloned first — see the README for the clone URL and first-time setup. (Do not reconstruct the URL from `{{USERNAME}}`: that placeholder is the *Windows* account name, not the GitHub account.)
 - **"Nothing to commit"**: Local config already matches the repo. This is normal.
 - **Merge conflicts after push pull**: Resolve manually in the repo directory, then retry.
 - **Missing API key warning on pull**: Expected on a new machine. Encrypt your Anthropic key with DPAPI locally — it can't be synced.

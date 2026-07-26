@@ -1,40 +1,17 @@
 # collect.ps1 -- Collect local Claude Code config into repo with username parameterized
 # Usage: powershell -ExecutionPolicy Bypass -File collect.ps1
+#
+# What gets collected, and what is deliberately left out, is described once in
+# Get-SyncPlan (lib\Common.ps1) and shared with deploy.ps1 and doctor.ps1.
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $repoRoot "lib\Common.ps1")
 
 $username = $env:USERNAME
-$escapedUsername = [regex]::Escape($username)
 $claudeHome = Join-Path $env:USERPROFILE ".claude"
 $desktopDir = Get-DesktopPath
-
-# --- Individual file mappings ---
-# NOTE: Repo-native files ("System Prompt.txt", lib\, and the launcher / doctor / restore /
-#       publish scripts) live in the repo -- no collect needed.
-# NOTE: ~/.claude/.*.enc secrets are NEVER collected (sensitive, DPAPI-encrypted,
-#       machine-specific). The allowlist below excludes them structurally; the registry
-#       of expected secret names lives in secrets.json.
-# NOTE: The PowerShell profile is deliberately NOT collected. The shell functions live in
-#       claude-functions.ps1, which each profile dot-sources via a managed block that
-#       deploy.ps1 injects. Collecting a whole profile would drag in whatever unrelated
-#       shell config the user keeps there -- and would only ever capture one of the two
-#       profile paths (5.1 vs 7+).
-$fileMappings = @(
-    @{ Source = "$claudeHome\settings.json";              Dest = "global\settings.json" }
-    @{ Source = "$claudeHome\statusline-command.ps1";     Dest = "global\statusline-command.ps1" }
-    @{ Source = "$claudeHome\claude-functions.ps1";       Dest = "powershell\claude-functions.ps1" }
-    @{ Source = "$desktopDir\CLAUDE.md";                   Dest = "project-desktop\CLAUDE.md" }
-    @{ Source = "$desktopDir\.claude\settings.local.json"; Dest = "project-desktop\.claude\settings.local.json" }
-)
-
-# --- Directory mappings (each Filter synced as a unit) ---
-$dirMappings = @(
-    @{ SourceDir = "$claudeHome\commands"; DestDir = "global\commands"; Filter = "*.md" }
-    @{ SourceDir = "$claudeHome\agents";   DestDir = "global\agents";  Filter = "*.md" }
-    @{ SourceDir = "$desktopDir\.claude\workflows"; DestDir = "project-desktop\.claude\workflows"; Filter = "*.js" }
-)
+$plan = Get-SyncPlan -ClaudeHome $claudeHome -DesktopDir $desktopDir
 
 # --- Settings the repo owns, which collect must not overwrite from this machine ---
 # A collected file is normally a faithful snapshot of whatever is live. 'model' is the
@@ -93,49 +70,48 @@ function Copy-Parameterized {
         return
     }
 
+    # -replace, not String.Replace: this direction must be case-INSENSITIVE, because a
+    # local path may spell the username with different casing than $env:USERNAME does
+    # (C:\users\jane\... is the same directory as C:\Users\Jane\...). A case-sensitive
+    # replace would leave those spellings behind as a real-name leak.
     $content = Get-Content -Path $SrcPath -Raw -Encoding UTF8
-    $content = $content -replace $escapedUsername, '{{USERNAME}}'
+    $content = $content -replace [regex]::Escape($username), '{{USERNAME}}'
 
     foreach ($owned in @($repoOwnedKeys | Where-Object { $_.File -eq $Label })) {
         $content = Restore-RepoOwnedKey -Content $content -RepoPath $DestPath -Key $owned.Key
     }
 
-    $destDir = Split-Path -Parent $DestPath
-    if (-not (Test-Path $destDir)) {
-        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-    }
-
-    [System.IO.File]::WriteAllText($DestPath, $content, [System.Text.UTF8Encoding]::new($false))
+    Write-TextFile -Path $DestPath -Content $content
     Write-Host "[OK]   $Label" -ForegroundColor Green
     $script:collected++
 }
 
 # Process individual files
-foreach ($map in $fileMappings) {
-    Copy-Parameterized -SrcPath $map.Source -DestPath (Join-Path $repoRoot $map.Dest) -Label $map.Dest
+foreach ($map in $plan.Files) {
+    Copy-Parameterized -SrcPath $map.Local -DestPath (Join-Path $repoRoot $map.Repo) -Label $map.Repo
 }
 
 # Process directories
-foreach ($dir in $dirMappings) {
-    if (-not (Test-Path $dir.SourceDir)) {
-        Write-Host "[SKIP] $($dir.SourceDir) (directory not found)" -ForegroundColor Yellow
+foreach ($dir in $plan.Dirs) {
+    if (-not (Test-Path $dir.Local)) {
+        Write-Host "[SKIP] $($dir.Local) (directory not found)" -ForegroundColor Yellow
         continue
     }
-    $files = Get-ChildItem -Path $dir.SourceDir -Filter $dir.Filter -File
+    $files = Get-ChildItem -Path $dir.Local -Filter $dir.Filter -File
     $localNames = @($files | ForEach-Object { $_.Name })
     foreach ($file in $files) {
-        $relDest = Join-Path $dir.DestDir $file.Name
+        $relDest = Join-Path $dir.Repo $file.Name
         Copy-Parameterized -SrcPath $file.FullName -DestPath (Join-Path $repoRoot $relDest) -Label $relDest
     }
 
     # Remove repo files that no longer exist locally
-    $repoDir = Join-Path $repoRoot $dir.DestDir
+    $repoDir = Join-Path $repoRoot $dir.Repo
     if (Test-Path $repoDir) {
         $repoFiles = Get-ChildItem -Path $repoDir -Filter $dir.Filter -File
         foreach ($rf in $repoFiles) {
             if ($rf.Name -notin $localNames) {
                 Remove-Item $rf.FullName -Force
-                Write-Host "[DEL]  $(Join-Path $dir.DestDir $rf.Name)" -ForegroundColor Red
+                Write-Host "[DEL]  $(Join-Path $dir.Repo $rf.Name)" -ForegroundColor Red
             }
         }
     }
@@ -144,10 +120,22 @@ foreach ($dir in $dirMappings) {
 Write-Host ""
 Write-Host "Collected $collected files, skipped $skipped." -ForegroundColor Cyan
 
-# Verify no real username leaked into repo files
+# --- Verify no real username leaked into repo files --------------------------
+# This is the last thing standing between a real name and a pushed commit, so it has
+# to actually run. It did not: the pattern is regex-escaped, and passing an escaped
+# pattern to -SimpleMatch searches for the BACKSLASHES too. Any username containing a
+# character Regex.Escape touches -- a space is the common one, since Regex.Escape turns
+# "First Last" into "First\ Last" -- could therefore never match, and this printed the
+# green "Verified: no instances" line no matter what the files contained.
+#
+# (Note the shape of the bug: it is a check that cannot fail. Prefer wording examples
+# around the live username here; this scan cannot tell an illustration from a leak.)
+#
+# Escaped pattern + regex matching is the correct pairing: it matches the name
+# literally AND stays case-insensitive, which -SimpleMatch would also have given up.
 $leaks = Get-ChildItem -Path $repoRoot -Recurse -File |
-    Where-Object { $_.FullName -notlike "*\.git\*" -and $_.FullName -notlike "*\.backups\*" -and $_.Name -ne "README.md" } |
-    Select-String -Pattern $escapedUsername -SimpleMatch
+    Where-Object { $_.FullName -notlike "*\.git\*" -and $_.FullName -notlike "*\.backups\*" } |
+    Select-String -Pattern ([regex]::Escape($username))
 if ($leaks) {
     Write-Host ""
     Write-Host "WARNING: Username '$username' still found in these repo files:" -ForegroundColor Red

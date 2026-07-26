@@ -22,6 +22,7 @@ $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $claudeHome = Join-Path $env:USERPROFILE ".claude"
 $desktopDir = Get-DesktopPath
+$plan       = Get-SyncPlan -ClaudeHome $claudeHome -DesktopDir $desktopDir
 
 $script:fails = 0
 $script:warns = 0
@@ -92,22 +93,18 @@ if (-not (Test-Path $localSettings)) {
 }
 
 # --- Deployed content vs what the repo ships --------------------------------
-# This is where "what correct looks like" is written down. A repo file that never
-# arrived is a failure; extra local files are the user's own and are fine.
+# The set of things that must be here comes from Get-SyncPlan, the same list
+# deploy.ps1 acts on -- so a mapping added to the repo is checked here without
+# anyone remembering to update this file. A repo file that never arrived is a
+# failure; extra local files are the user's own and are fine.
 Section "Deployed content"
 
-$contentSets = @(
-    @{ Name = 'commands';  RepoDir = "global\commands";                     LocalDir = "$claudeHome\commands"; Filter = '*.md' }
-    @{ Name = 'agents';    RepoDir = "global\agents";                       LocalDir = "$claudeHome\agents";   Filter = '*.md' }
-    @{ Name = 'workflows'; RepoDir = "project-desktop\.claude\workflows";   LocalDir = "$desktopDir\.claude\workflows"; Filter = '*.js' }
-)
-
-foreach ($set in $contentSets) {
-    $repoDir = Join-Path $repoRoot $set.RepoDir
+foreach ($set in $plan.Dirs) {
+    $repoDir = Join-Path $repoRoot $set.Repo
     $repoNames  = @()
     $localNames = @()
-    if (Test-Path $repoDir)       { $repoNames  = @(Get-ChildItem $repoDir -Filter $set.Filter -File | ForEach-Object Name) }
-    if (Test-Path $set.LocalDir)  { $localNames = @(Get-ChildItem $set.LocalDir -Filter $set.Filter -File | ForEach-Object Name) }
+    if (Test-Path $repoDir)    { $repoNames  = @(Get-ChildItem $repoDir -Filter $set.Filter -File | ForEach-Object Name) }
+    if (Test-Path $set.Local)  { $localNames = @(Get-ChildItem $set.Local -Filter $set.Filter -File | ForEach-Object Name) }
 
     $missing = @($repoNames | Where-Object { $_ -notin $localNames })
     $extra   = @($localNames | Where-Object { $_ -notin $repoNames })
@@ -120,6 +117,41 @@ foreach ($set in $contentSets) {
     } else {
         Check FAIL "$($set.Name): $($missing.Count) missing -- $($missing -join ', ')" "run deploy.ps1"
     }
+}
+
+# --- Does the deployed copy still MATCH the repo? ---------------------------
+# Presence was never the whole question. Editing ~/.claude/commands/foo.md directly
+# is the normal way to work on a skill, and nothing announces that the repo now
+# disagrees -- until the next deploy silently overwrites the edit (recoverably, into
+# .backups\, but only if you know to look). Neither answer is "wrong", so this warns
+# and names both directions rather than failing.
+$drifted = @()
+$deployedPairs = @()
+foreach ($map in $plan.Files) {
+    $deployedPairs += @{ Repo = (Join-Path $repoRoot $map.Repo); Local = $map.Local; Label = $map.Repo }
+}
+foreach ($set in $plan.Dirs) {
+    $repoDir = Join-Path $repoRoot $set.Repo
+    if (-not (Test-Path $repoDir)) { continue }
+    foreach ($f in (Get-ChildItem $repoDir -Filter $set.Filter -File)) {
+        $deployedPairs += @{
+            Repo  = $f.FullName
+            Local = (Join-Path $set.Local $f.Name)
+            Label = (Join-Path $set.Repo $f.Name)
+        }
+    }
+}
+
+foreach ($p in $deployedPairs) {
+    if (-not (Test-Path $p.Repo) -or -not (Test-Path $p.Local)) { continue }   # absence reported above
+    $expected = Expand-UserName -Text (Get-Content $p.Repo -Raw -Encoding UTF8) -UserName $env:USERNAME
+    if ((Get-Content $p.Local -Raw -Encoding UTF8) -ne $expected) { $drifted += $p.Label }
+}
+
+if ($drifted.Count -eq 0) {
+    Check OK "every deployed file matches the repo"
+} else {
+    Check WARN "$($drifted.Count) deployed file(s) differ from the repo -- $($drifted -join ', ')" "collect.ps1 to keep the local edits, deploy.ps1 to take the repo's"
 }
 
 # --- Statusline: does it actually run? --------------------------------------
@@ -205,31 +237,30 @@ if ($wtPaths.Count -eq 0) {
 # --- Secrets (optional, per-machine, never synced) --------------------------
 Section "Secrets (per-machine, never synced)"
 
-$registryPath = Join-Path $repoRoot "secrets.json"
-if (-not (Test-Path $registryPath)) {
+$registry = $null
+try { $registry = Get-SecretsRegistry -RepoRoot $repoRoot }
+catch { Check FAIL "secrets.json is not valid JSON -- $($_.Exception.Message)" }
+
+if ($null -eq $registry) {
     Check WARN "secrets.json not found in repo"
 } else {
     # Present is not the same as readable. A file written by an older scheme, or by a
     # different Windows user or machine, sits there looking fine and fails at the
     # moment something needs it -- which is a launcher failing, not a warning. So
     # decrypt each one for real and report what actually happens.
-    try {
-        foreach ($sec in @((Get-Content $registryPath -Raw | ConvertFrom-Json).secrets)) {
-            $encPath = Join-Path $claudeHome ".$($sec.name).enc"
-            if (-not (Test-Path $encPath)) {
-                Check WARN "$($sec.name) absent -- $($sec.purpose)" "& `"$repoRoot\Set-Secret.ps1`" -Name $($sec.name)"
-                continue
-            }
-            $value = $null
-            try { $value = & (Join-Path $repoRoot "Get-Secret.ps1") -Name $sec.name 2>$null } catch { }
-            if ([string]::IsNullOrWhiteSpace($value)) {
-                Check FAIL "$($sec.name) present but cannot be decrypted -- $($sec.purpose)" "re-encrypt it on this machine: & `"$repoRoot\Set-Secret.ps1`" -Name $($sec.name)"
-            } else {
-                Check OK "$($sec.name) present and decrypts"
-            }
+    foreach ($sec in $registry) {
+        $encPath = Join-Path $claudeHome ".$($sec.name).enc"
+        if (-not (Test-Path $encPath)) {
+            Check WARN "$($sec.name) absent -- $($sec.purpose)" "& `"$repoRoot\Set-Secret.ps1`" -Name $($sec.name)"
+            continue
         }
-    } catch {
-        Check FAIL "secrets.json is not valid JSON -- $($_.Exception.Message)"
+        $value = $null
+        try { $value = & (Join-Path $repoRoot "Get-Secret.ps1") -Name $sec.name 2>$null } catch { }
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            Check FAIL "$($sec.name) present but cannot be decrypted -- $($sec.purpose)" "re-encrypt it on this machine: & `"$repoRoot\Set-Secret.ps1`" -Name $($sec.name)"
+        } else {
+            Check OK "$($sec.name) present and decrypts"
+        }
     }
 }
 
