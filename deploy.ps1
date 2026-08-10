@@ -22,6 +22,8 @@ $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $username   = $env:USERNAME
 $claudeHome = Join-Path $env:USERPROFILE ".claude"
 $desktopDir = Get-DesktopPath
+$configRoot = Get-ConfigRoot -RepoRoot $repoRoot
+$desktopTok = Get-DesktopToken
 $plan       = Get-SyncPlan -ClaudeHome $claudeHome -DesktopDir $desktopDir
 
 # Files this script has deployed before. Pruning is limited to this list so a
@@ -52,34 +54,48 @@ foreach ($map in $plan.Files) {
     $allPairs += @{ Source = (Join-Path $repoRoot $map.Repo); Dest = $map.Local; Label = $map.Repo }
 }
 foreach ($dir in $plan.Dirs) {
-    $srcDir = Join-Path $repoRoot $dir.Repo
-    if (Test-Path $srcDir) {
-        foreach ($file in (Get-ChildItem -Path $srcDir -Filter $dir.Filter -File)) {
-            $allPairs += @{
-                Source = $file.FullName
-                Dest   = (Join-Path $dir.Local $file.Name)
-                Label  = (Join-Path $dir.Repo $file.Name)
-            }
+    foreach ($file in (Get-PlanFiles -Root (Join-Path $repoRoot $dir.Repo) -Filter $dir.Filter -Recurse $dir.Recurse)) {
+        $allPairs += @{
+            Source = $file.FullName
+            Dest   = (Join-Path $dir.Local $file.RelPath)
+            Label  = (Join-Path $dir.Repo $file.RelPath)
         }
     }
 }
 
-# --- Backup existing files ---
+# --- Resolve what each pair would write, and whether that is a change ---------
+# Done before anything is backed up, because "would this change?" is what the backup
+# step needs to know. Backing up every destination that merely EXISTS means a deploy
+# that changes nothing still writes a full snapshot, and since retention keeps only the
+# newest N directories, N no-op deploys are enough to evict every snapshot taken before
+# a real edit -- a window that reports N generations of depth while holding one. The
+# window has to count changes, not runs.
+foreach ($pair in $allPairs) {
+    $pair.Missing = -not (Test-Path $pair.Source)
+    if ($pair.Missing) { continue }
+    $pair.Content = Expand-Tokens -Text (Get-Content -Path $pair.Source -Raw -Encoding UTF8) `
+                                  -UserName $username -ConfigRoot $configRoot -Desktop $desktopTok
+    $pair.Existed = Test-Path $pair.Dest
+    $pair.Changed = -not ($pair.Existed -and
+                          ((Get-Content -Path $pair.Dest -Raw -Encoding UTF8) -eq $pair.Content))
+}
+
+# --- Backup the files this run is actually going to overwrite ----------------
 # Each backup directory gets a manifest.json recording Label -> Dest so restore.ps1
-# can put files back exactly where they came from instead of inferring it.
+# can put files back exactly where they came from instead of inferring it. A file that
+# does not exist yet is skipped: there is nothing of yours to preserve.
 $timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
 $backupDir = Join-Path $repoRoot ".backups\$timestamp"
 $backupEntries = @()
 
 foreach ($pair in $allPairs) {
-    if (Test-Path $pair.Dest) {
-        $backupEntries += [ordered]@{ Label = $pair.Label; Dest = $pair.Dest }
-        if (-not $DryRun) { Copy-ToBackup -Path $pair.Dest -Label $pair.Label }
-    }
+    if ($pair.Missing -or -not $pair.Changed -or -not $pair.Existed) { continue }
+    $backupEntries += [ordered]@{ Label = $pair.Label; Dest = $pair.Dest }
+    if (-not $DryRun) { Copy-ToBackup -Path $pair.Dest -Label $pair.Label }
 }
 
 if ($backupEntries.Count -gt 0) {
-    Say "Backing up $($backupEntries.Count) existing files to .backups\$timestamp\" 'Cyan' -Plan
+    Say "Backing up $($backupEntries.Count) file(s) about to be overwritten, to .backups\$timestamp\" 'Cyan' -Plan
 }
 
 # --- Deploy files ---
@@ -90,7 +106,7 @@ $deleted   = 0
 $deployedDests = @()
 
 foreach ($pair in $allPairs) {
-    if (-not (Test-Path $pair.Source)) {
+    if ($pair.Missing) {
         Say "[SKIP] $($pair.Label) (not in repo)" 'Yellow'
         $skipped++
         continue
@@ -98,12 +114,7 @@ foreach ($pair in $allPairs) {
 
     $deployedDests += $pair.Dest
 
-    $content = Expand-UserName -Text (Get-Content -Path $pair.Source -Raw -Encoding UTF8) -UserName $username
-
-    $isSame = (Test-Path $pair.Dest) -and
-              ((Get-Content -Path $pair.Dest -Raw -Encoding UTF8) -eq $content)
-
-    if ($isSame) {
+    if (-not $pair.Changed) {
         Say "[SAME] $($pair.Label)" 'DarkGray'
         $unchanged++
         continue
@@ -112,7 +123,7 @@ foreach ($pair in $allPairs) {
     if ($DryRun) {
         Say "[OK]   $($pair.Label) -> $($pair.Dest)" 'Green' -Plan
     } else {
-        Write-TextFile -Path $pair.Dest -Content $content
+        Write-TextFile -Path $pair.Dest -Content $pair.Content
         Say "[OK]   $($pair.Label) -> $($pair.Dest)" 'Green'
     }
     $written++
@@ -136,12 +147,15 @@ foreach ($stale in ($previousDests | Where-Object { $_ -and ($_ -notin $deployed
     if ($DryRun) {
         Say "[DEL]  $stale (removed from repo)" 'Red' -Plan
     } else {
-        # Keep the parent directory name in the label. 'pruned\<leaf>' alone collides
-        # whenever two synced directories hold the same filename -- commands\notes.md
-        # and agents\notes.md would overwrite each other in the backup AND produce two
+        # Keep enough of the path in the label to stay unique. 'pruned\<leaf>' alone
+        # collides whenever two synced directories hold the same filename -- agents\notes.md
+        # and workflows\notes.md would overwrite each other in the backup AND produce two
         # manifest entries with the same Label pointing at different destinations, so a
-        # restore would put one file's content back at the other file's path.
-        $label = Join-Path "pruned" (Join-Path (Split-Path -Leaf (Split-Path -Parent $stale)) (Split-Path -Leaf $stale))
+        # restore would put one file's content back at the other file's path. Two
+        # segments were enough while every synced directory was flat; skills are nested,
+        # and every one of them ends in 'SKILL.md', so take three.
+        $segments = @($stale -split '[\\/]' | Where-Object { $_ }) | Select-Object -Last 3
+        $label = Join-Path "pruned" ($segments -join '\')
         Copy-ToBackup -Path $stale -Label $label
         $backupEntries += [ordered]@{ Label = $label; Dest = $stale }
         Remove-Item $stale -Force

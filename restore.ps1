@@ -13,9 +13,12 @@
 #
 # Exit code: 0 on success (including list mode), 1 on refusal or bad arguments.
 
+# Listing is what this script does when you do not ask it to restore anything, so there
+# is no -List switch: one existed, and did nothing except be rejected in combination
+# with the flags that DO something. A parameter whose only behaviour is to be refused
+# reads like a capability and is really a trap.
 [CmdletBinding()]
 param(
-    [switch]$List,
     [switch]$Latest,
     [string]$Timestamp,
     [switch]$DryRun
@@ -45,7 +48,6 @@ function Get-ManifestPath { param($Dir) Join-Path $Dir.FullName "manifest.json" 
 $restoring = $Latest -or -not [string]::IsNullOrEmpty($Timestamp)
 
 if ($Latest -and $Timestamp)      { Fail "Use -Latest or -Timestamp <stamp>, not both." }
-if ($List -and $restoring)        { Fail "-List cannot be combined with -Latest or -Timestamp." }
 if ($DryRun -and -not $restoring) { Fail "-DryRun previews a restore; pair it with -Latest or -Timestamp <stamp>." }
 
 # --- Enumerate backups (newest first; see Get-BackupDirs for why it filters) ---

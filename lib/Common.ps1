@@ -48,6 +48,12 @@ function Get-DesktopPath {
 #     cannot travel. secrets.json registers the names; each machine runs Set-Secret.ps1.
 #   - Repo-native scripts ("System Prompt.txt", lib\, and the launcher / doctor /
 #     restore / publish scripts). They are run FROM the repo, not deployed.
+#
+# Two memory files, at two scopes, on purpose. ~/.claude/CLAUDE.md holds the facts
+# that are true wherever a session is started; <Desktop>\CLAUDE.md holds only what is
+# true of the Desktop itself. They were one file for a long time, which worked because
+# sessions usually start on the Desktop -- and quietly meant every user-level fact was
+# unavailable the moment one did not.
 function Get-SyncPlan {
     param(
         [Parameter(Mandatory)][string]$ClaudeHome,
@@ -57,6 +63,7 @@ function Get-SyncPlan {
         # Repo path (relative to repo root) <-> absolute local path.
         Files = @(
             @{ Repo = 'global\settings.json';                        Local = "$ClaudeHome\settings.json" }
+            @{ Repo = 'global\CLAUDE.md';                            Local = "$ClaudeHome\CLAUDE.md" }
             @{ Repo = 'global\statusline-command.ps1';               Local = "$ClaudeHome\statusline-command.ps1" }
             @{ Repo = 'powershell\claude-functions.ps1';             Local = "$ClaudeHome\claude-functions.ps1" }
             @{ Repo = 'project-desktop\CLAUDE.md';                   Local = "$DesktopDir\CLAUDE.md" }
@@ -65,20 +72,89 @@ function Get-SyncPlan {
         # Every file matching Filter is synced as a unit, in both directions:
         # deleting one locally removes it from the repo on the next collect, and
         # deleting it from the repo prunes it locally on the next deploy.
+        #
+        # Recurse belongs to the skills entry because a skill is a DIRECTORY, not a
+        # file: ~/.claude/skills/<name>/SKILL.md plus whatever supporting files that
+        # skill bundles. Filter is '*' there for the same reason -- restricting it to
+        # '*.md' would sync a skill's instructions while silently leaving behind the
+        # scripts those instructions tell Claude to run.
         Dirs = @(
-            @{ Name = 'commands';  Repo = 'global\commands'; Local = "$ClaudeHome\commands"; Filter = '*.md' }
-            @{ Name = 'agents';    Repo = 'global\agents';   Local = "$ClaudeHome\agents";   Filter = '*.md' }
-            @{ Name = 'workflows'; Repo = 'project-desktop\.claude\workflows'; Local = "$DesktopDir\.claude\workflows"; Filter = '*.js' }
+            @{ Name = 'skills';    Repo = 'global\skills';   Local = "$ClaudeHome\skills";   Filter = '*';    Recurse = $true  }
+            @{ Name = 'agents';    Repo = 'global\agents';   Local = "$ClaudeHome\agents";   Filter = '*.md'; Recurse = $false }
+            @{ Name = 'workflows'; Repo = 'project-desktop\.claude\workflows'; Local = "$DesktopDir\.claude\workflows"; Filter = '*.js'; Recurse = $false }
         )
     }
 }
 
-# The repo stores the username as {{USERNAME}} so one repo serves every machine.
-# String.Replace, not -replace: the token's casing is fixed, and a regex
-# replacement would give special meaning to '$' in the username.
-function Expand-UserName {
-    param([string]$Text, [string]$UserName)
-    return $Text.Replace('{{USERNAME}}', $UserName)
+# Enumerate one Dirs entry, in either direction, returning each file's path together
+# with its path RELATIVE to the set root.
+#
+# The relative path is the whole point. collect, deploy and doctor used to build their
+# own file lists with $_.Name, which is only correct while every synced directory is
+# flat -- skills are not, and 'SKILL.md' as an identity would have collapsed all seven
+# of them onto each other. Routing all three through here means the question "what is
+# in this set?" has one answer.
+function Get-PlanFiles {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [string]$Filter = '*',
+        [bool]$Recurse = $false
+    )
+    if (-not (Test-Path $Root)) { return @() }
+    $rootFull = (Resolve-Path -LiteralPath $Root).ProviderPath.TrimEnd('\')
+    return @(Get-ChildItem -LiteralPath $rootFull -Filter $Filter -File -Recurse:$Recurse |
+        ForEach-Object {
+            [pscustomobject]@{
+                FullName = $_.FullName
+                RelPath  = $_.FullName.Substring($rootFull.Length + 1)
+            }
+        })
+}
+
+# --- The machine-specific values the repo refuses to hardcode -----------------
+#   {{USERNAME}}     the Windows account name
+#   {{DESKTOP}}      the real Desktop, forward-slashed (OneDrive-aware)
+#   {{CONFIG_ROOT}}  the absolute path of this repo, forward-slashed
+#
+# CONFIG_ROOT and DESKTOP exist because prose is executed too. A skill telling Claude to
+# run a script under '$HOME/Desktop/claude-config' is simply wrong on a machine with
+# OneDrive Known Folder Move -- the same literal-Desktop assumption Get-DesktopPath
+# prevents in code -- and no amount of correctness in the .ps1 files repairs it, because
+# the .md is what Claude reads and acts on.
+#
+# They are tokens rather than a convention because a convention has nothing enforcing it:
+# the username sweep in collect.ps1 cannot see a hardcoded Desktop path, since most ways
+# of spelling one ('$HOME/...', '$env:USERPROFILE\...', a bare relative 'Desktop\...')
+# contain no username at all. doctor.ps1 fails on any that survive.
+#
+# Forward slashes because a skill's instructions get executed through whichever shell
+# Claude reaches for: PowerShell accepts 'C:/Users/...' everywhere, and Git Bash reads
+# backslashes as escapes. global\settings.json already spelled its path this way.
+#
+# String.Replace, not -replace: the tokens' casing is fixed, and a regex replacement
+# would give special meaning to '$' in a username or a path.
+function Expand-Tokens {
+    param([string]$Text, [string]$UserName, [string]$ConfigRoot, [string]$Desktop)
+    return $Text.Replace('{{CONFIG_ROOT}}', $ConfigRoot).
+                 Replace('{{DESKTOP}}',     $Desktop).
+                 Replace('{{USERNAME}}',    $UserName)
+}
+
+# What {{CONFIG_ROOT}} and {{DESKTOP}} expand to. One function each, because collect.ps1
+# REVERSES these substitutions while deploy.ps1 and doctor.ps1 apply them; the two
+# directions disagreeing by a single slash would make every round trip look like a change.
+#
+# Reversing is the direction with an ordering constraint, and collect.ps1 honours it:
+# the config root is a PREFIX of nothing but is PREFIXED BY the Desktop, so tokenizing
+# the Desktop first would turn '<Desktop>/claude-config' into '{{DESKTOP}}/claude-config'
+# and the longer, more specific token would never match again.
+function Get-ConfigRoot {
+    param([Parameter(Mandatory)][string]$RepoRoot)
+    return $RepoRoot.Replace('\', '/').TrimEnd('/')
+}
+
+function Get-DesktopToken {
+    return (Get-DesktopPath).Replace('\', '/').TrimEnd('/')
 }
 
 # --- secrets.json, read the same way by deploy.ps1 and doctor.ps1 ------------

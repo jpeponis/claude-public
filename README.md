@@ -1,7 +1,7 @@
 # Claude Code Portable Configuration
 
-A template for syncing Claude Code settings, launchers, agents, slash commands, a statusline,
-and dynamic workflows across multiple Windows machines. It installs in one command, checks its
+A template for syncing Claude Code settings, launchers, agents, skills, a statusline, and
+dynamic workflows across multiple Windows machines. It installs in one command, checks its
 own work, and can put back anything a deploy overwrote. This is the public version of a personal
 setup — feel free to fork, adapt, and add your own skills, agents, and workflows.
 
@@ -9,18 +9,21 @@ setup — feel free to fork, adapt, and add your own skills, agents, and workflo
 
 - `global/` — Maps to `%USERPROFILE%\.claude\` (global Claude Code config)
   - `settings.json` — Global settings, permissions, model, and statusline registration
+  - `CLAUDE.md` — User-level instructions: what holds wherever you start a session
   - `statusline-command.ps1` — Statusline showing user@machine, the current directory and git
     branch, subscription usage for the current five-hour window, time until that window resets,
     and how full the context window is
   - `agents/` — Agent definitions (file-manager, for bulk file operations that would otherwise
     eat the main context; research-worker, the minimal-context worker used by
     deep-research-tiered)
-  - `commands/` — Slash commands (sync-config, api-agent)
+  - `skills/<name>/SKILL.md` — Skills, one directory each (sync-config, api-agent,
+    deep-research-tiered). The directory name is the slash command, and the whole directory
+    syncs, so a skill can carry the scripts and reference files it depends on
 - `project-desktop/` — Maps to your Desktop (project-level config). Resolved with
   `[Environment]::GetFolderPath('Desktop')` rather than `%USERPROFILE%\Desktop`, so it still
   lands in the right place when OneDrive Known Folder Move has redirected Desktop — which is
   the default on a consumer Windows 11 setup
-  - `CLAUDE.md` — Project instructions
+  - `CLAUDE.md` — Instructions scoped to the Desktop itself
   - `.claude/settings.local.json` — Project-local settings
   - `.claude/workflows/` — Dynamic workflow scripts (`*.js`, e.g. deep-research-tiered)
 - `powershell/claude-functions.ps1` — Maps to `%USERPROFILE%\.claude\`, dot-sourced by both
@@ -36,8 +39,8 @@ setup — feel free to fork, adapt, and add your own skills, agents, and workflo
   machine only) and are never collected or deployed; `deploy.ps1` warns about missing ones.
 - `secrets.json` — Registry of which secrets exist and what each one unlocks
 - `lib/Common.ps1` — Shared helpers: the sync plan (what gets synced, declared once and read by
-  collect, deploy and doctor), username substitution, profile discovery, managed-block
-  injection, backup enumeration, JSON validation
+  collect, deploy and doctor), file enumeration, token substitution, profile discovery,
+  managed-block injection, backup enumeration, JSON validation
 - `System Prompt.txt` — Custom system prompt (repo-native, not collected/deployed)
 - `claude-api.ps1` — Standalone API-mode launcher (repo-native)
 - `apply-terminal-keybinding.ps1` — Repo-native; injects a Shift+Enter→newline action into the
@@ -47,10 +50,26 @@ The scripts run from the repo; `global/` and `project-desktop/` are what gets de
 
 ## How Path Portability Works
 
-Settings files contain hardcoded Windows paths like `C:\Users\<name>\...`. Since usernames differ
-across machines, the scripts replace the username with a `{{USERNAME}}` placeholder in the repo,
-and substitute the local machine's `%USERNAME%` when deploying. After collecting, `collect.ps1`
-verifies that no real username leaked into the repo.
+Config files contain absolute Windows paths, and they differ on every machine. Three tokens stand
+in for the parts that vary. `collect.ps1` writes them when it pulls config into the repo, and
+`deploy.ps1` expands them on the way back out:
+
+| Token | Expands to |
+| --- | --- |
+| `{{USERNAME}}` | your Windows account name |
+| `{{DESKTOP}}` | your real Desktop, forward-slashed |
+| `{{CONFIG_ROOT}}` | this repo's absolute path, forward-slashed |
+
+Collect matches case-insensitively and accepts either slash direction, since a path on disk may be
+spelled differently than `%USERNAME%` reports it. Deploy substitutes literally, in forward-slash
+form, which both PowerShell and Git Bash accept. Afterwards `collect.ps1` verifies that no real
+username survived into the repo, and `doctor.ps1` fails if any synced markdown hardcodes a
+Desktop path.
+
+Markdown needs the tokens as much as JSON does. A skill telling Claude to run
+`$HOME/Desktop/claude-config/something.ps1` is wrong on any machine where OneDrive Known Folder
+Move has redirected Desktop — the instructions are executed, so a path in prose is as real as a
+path in a settings file.
 
 One key is deliberately excluded from collection: `model` in `global/settings.json`. It records
 whichever model the last session happened to be using, so collecting it would let one machine's
@@ -156,8 +175,8 @@ judge whether a cheaper or more expensive model will be good enough for your wor
 
 ## Ongoing Usage
 
-One command moves your configuration between machines. Synced: `global/settings.json`, slash
-commands, agents, the statusline, the shell functions, `CLAUDE.md`, project-local settings, and
+One command moves your configuration between machines. Synced: `global/settings.json`, skills,
+agents, the statusline, the shell functions, both `CLAUDE.md` files, project-local settings, and
 workflow scripts. Not synced: the encrypted secrets, which are per-machine by construction, and
 your PowerShell profile — the functions live in their own file that the profile sources, so
 nothing else in the profile is touched.
@@ -226,7 +245,7 @@ One note (noted at the top of `claude-functions.ps1` as well): `claude-sp` uses
 ```
 
 `doctor.ps1` reports what is actually true on this machine: Claude Code and Node versions,
-settings that parse, every command and agent the repo ships being present, every deployed file
+settings that parse, every skill and agent the repo ships being present, every deployed file
 still *matching* the repo, the statusline actually executing, both PowerShell profiles wired up,
 the Shift+Enter binding, and secrets that actually decrypt. Each failure prints the command that
 fixes it, and the script exits non-zero if anything failed. `/sync-config pull` runs it
@@ -236,11 +255,16 @@ It exists because `deploy.ps1` can only report what it *wrote*, which can be ent
 the outcome is still wrong — a file written perfectly to a location nothing reads is the
 motivating case.
 
-The match check earns its place for a quieter reason: editing `~/.claude/commands/foo.md`
+The match check earns its place for a quieter reason: editing `~/.claude/skills/foo/SKILL.md`
 directly is a perfectly normal way to work on a skill, and nothing otherwise tells you the repo
 now disagrees — until a later deploy overwrites the edit. It warns rather than fails, because
 either direction can be the right one: `collect.ps1` keeps the local version, `deploy.ps1` takes
 the repo's.
+
+A final section checks the content rather than the plumbing: that every skill declares a
+`description`, that no synced markdown hardcodes a Desktop path, and that `research-worker.md`
+still agrees with `System Prompt.txt`, which it deliberately duplicates. These are the kind of
+mistake every other check passes straight over.
 
 To see what a deploy would change without changing anything:
 
@@ -256,16 +280,16 @@ It prints every write, deletion, profile edit and environment change, and perfor
 .\restore.ps1 -Latest         # put it back
 ```
 
-Every deploy first backs up what it is about to overwrite into `.backups\<timestamp>\`, with a
-manifest recording where each file came from, so `restore.ps1` puts files back exactly there
-instead of inferring it. Files that already match are skipped, so recovering one bad file
-rewrites only that file. Deploy keeps the newest 20 backup directories and deletes older ones;
-pass `-KeepBackups <n>` to change that.
+Every deploy first backs up the files it is about to overwrite into `.backups\<timestamp>\`, with
+a manifest recording where each file came from, so `restore.ps1` puts files back exactly there
+instead of inferring it. Only files whose content actually changes are copied, so a deploy that
+changes nothing creates no backup directory at all and the newest 20 directories it keeps are 20
+real changes rather than 20 runs. Pass `-KeepBackups <n>` to change how many are kept.
 
 `deploy.ps1` is additive by design. It adds a small marked block to your PowerShell profiles
 rather than replacing them, and it only ever deletes files it previously deployed itself
-(tracked in `~/.claude/.deployed-manifest.json`), so slash commands and agents you write yourself
-are never touched.
+(tracked in `~/.claude/.deployed-manifest.json`), so skills and agents you write yourself are
+never touched.
 
 ## Windows Terminal Shift+Enter
 
@@ -277,6 +301,42 @@ exists — a `sendInput` action emitting `\u001b\r` (ESC+CR, which Claude Code r
 and a `shift+enter` keybinding mapped to it. Re-running is a no-op once present; the original
 file is backed up to `.backups\terminal\` before any change. `deploy.ps1` invokes it
 automatically, so `/sync-config pull` applies it on every machine.
+
+## Skills
+
+A skill is a directory under `global/skills/`, deployed to `~/.claude/skills/`. The directory
+name becomes the slash command; `SKILL.md` holds the instructions. Because the whole directory
+syncs, a skill can carry the scripts, templates and reference files its instructions rely on.
+
+Give every skill a `description`. It is what Claude reads to decide whether a skill applies to
+what you just asked for, and when it is missing the listing falls back to the first paragraph of
+the file — so a skill that opens with a title heading advertises itself as that title and nothing
+more. Write the description in the words you would actually use to ask for it, put the main use
+case first, and keep it under 1,536 characters. `doctor.ps1` fails on a skill without one.
+
+Keep frontmatter to the six fields the [Agent Skills spec](https://agentskills.io) allows:
+`name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`. Claude Code
+accepts several more, but uploading a skill to claude.ai — the route by which a personal skill
+reaches Cowork and cloud sessions — rejects anything outside the spec with a hard error rather
+than ignoring it. Note that neither `~/.claude/skills/` nor `~/.claude/commands/` is read by
+those sessions at all; they load the skills enabled for your claude.ai account.
+
+Files in `.claude/commands/` still work and still produce a slash command, so an older layout
+keeps running. If you are upgrading from one, the first `/sync-config pull` after this change
+deletes the `~/.claude/commands/*.md` files this repo previously deployed and installs the skill
+directories in their place. That deletion is bounded by `.deployed-manifest.json`, so commands
+you wrote yourself stay where they are, and everything removed is backed up first.
+
+## Two CLAUDE.md files
+
+`global/CLAUDE.md` deploys to `~/.claude/CLAUDE.md` and holds what is true wherever you start a
+session. `project-desktop/CLAUDE.md` deploys to `<Desktop>\CLAUDE.md` and holds only what is true
+of the Desktop. Claude reads the first in every session and the second only when the session
+starts there, so a user-level fact kept in the project file is a fact that quietly goes missing
+whenever you work somewhere else.
+
+Keep procedures out of both. A section that has become a sequence of steps belongs in a skill,
+where it costs no context until something actually calls for it.
 
 ## Dynamic Workflows
 
@@ -292,24 +352,29 @@ runs a completeness critique against the key assertions. Every spawned agent use
 prompt with no MCP tools or skills.
 
 `enableWorkflows` ships as `false` in `global/settings.json`, to keep the Workflow tool's large
-schema out of context in ordinary sessions. The deployed `CLAUDE.md` instructs Claude to set it to
-`true` when a workflow is actually needed and back to `false` afterwards; the setting hot-reloads
-on every request, so no restart is involved.
+schema out of context in ordinary sessions. The `/deep-research-tiered` skill turns it on, runs
+the workflow, and turns it back off; the setting hot-reloads on every request, so no restart is
+involved. To start a session with workflows already enabled instead, pass
+`--settings "$env:USERPROFILE\.claude\workflows-on.json"` — a one-key file that overrides nothing
+else.
 
 Because workflow scripts hold no machine-specific paths, they are copied verbatim (the username
 placeholder pass is a no-op on them).
 
 ## Adding New Files to Sync
 
-To add a new **slash command**, drop a `.md` file in `global/commands/`. For a new **agent**, a
-`.md` file in `global/agents/`. For a new **workflow**, a `.js` file in
+To add a new **skill**, create `global/skills/<name>/SKILL.md`. For a new **agent**, a `.md` file
+in `global/agents/`. For a new **workflow**, a `.js` file in
 `project-desktop/.claude/workflows/`. For a new **secret**, add a `{name, purpose}` entry to
 `secrets.json`; `deploy.ps1` and `doctor.ps1` then report on it automatically.
 
 To sync something the repo does not already handle, add one entry to `Get-SyncPlan` in
 `lib/Common.ps1` — `Files` for an individual file, `Dirs` for a whole folder with a `Filter`
-(e.g. `*.md` or `*.js`). That single list is what `collect.ps1`, `deploy.ps1` and `doctor.ps1`
-all read, so one entry teaches all three.
+(e.g. `*.md` or `*.js`) and a `Recurse` flag for folders with subdirectories, as skills have.
+That single list is what `collect.ps1`, `deploy.ps1` and `doctor.ps1` all read, so one entry
+teaches all three. Each of them enumerates a folder through `Get-PlanFiles`, which identifies a
+file by its path relative to the folder root rather than by its name — which is what lets every
+skill call its file `SKILL.md` without them colliding.
 
 Folders sync as a unit in both directions: a file deleted locally leaves the repo on the next
 collect, and a file deleted from the repo is pruned locally on the next deploy (after a backup).

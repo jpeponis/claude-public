@@ -1,6 +1,11 @@
+---
+name: sync-config
+description: Push or pull this machine's Claude Code configuration - settings, skills, agents, workflows, statusline and shell functions - through the private claude-config git repo, then verify the result with doctor. Use when the user wants to sync, back up or restore their Claude Code setup, propagate a config change to their other machines, or pick up changes made on another machine.
+---
+
 # Sync Claude Code Configuration
 
-Keeps Claude Code settings, skills, agents, and shell profile in sync across machines via a private GitHub repo (`~/Desktop/claude-config`).
+Keeps Claude Code settings, skills, agents, and shell profile in sync across machines via a private GitHub repo (`{{CONFIG_ROOT}}`).
 
 ## Usage
 /sync-config [push|pull]
@@ -17,26 +22,26 @@ The script is `sync-config.ps1` in the config repo. Always quote `"$HOME/..."` i
 ### Pull (default)
 Run:
 ```
-powershell.exe -ExecutionPolicy Bypass -File "$HOME/Desktop/claude-config/sync-config.ps1" pull
+powershell.exe -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" pull
 ```
 Report output to the user. Remind them to restart Claude Code if settings changed.
 
 ### Push
 1. Run with `-DryRun` first:
 ```
-powershell.exe -ExecutionPolicy Bypass -File "$HOME/Desktop/claude-config/sync-config.ps1" push -DryRun
+powershell.exe -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" push -DryRun
 ```
 2. Show the user what will be committed and **ask for confirmation**.
 3. If confirmed, run without `-DryRun`:
 ```
-powershell.exe -ExecutionPolicy Bypass -File "$HOME/Desktop/claude-config/sync-config.ps1" push
+powershell.exe -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" push
 ```
 
 ### Default
 If no argument is provided, default to **pull**.
 
 ## Troubleshooting
-- **git push/pull auth fails**: Git credential manager handles auth. Run `git -C "$HOME/Desktop/claude-config" push origin main` manually to diagnose. On a new machine the repo must be cloned first — see the README for the clone URL and first-time setup. (Do not reconstruct the URL from `{{USERNAME}}`: that placeholder is the *Windows* account name, not the GitHub account.)
+- **git push/pull auth fails**: Git credential manager handles auth. Run `git -C "{{CONFIG_ROOT}}" push origin main` manually to diagnose. On a new machine the repo must be cloned first — see the README for the clone URL and first-time setup. (Do not reconstruct the URL from `{{USERNAME}}`: that placeholder is the *Windows* account name, not the GitHub account.)
 - **"Nothing to commit"**: Local config already matches the repo. This is normal.
 - **Merge conflicts after push pull**: Resolve manually in the repo directory, then retry.
 - **Missing API key warning on pull**: Expected on a new machine. Encrypt your Anthropic key with DPAPI locally — it can't be synced.
