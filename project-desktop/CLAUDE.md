@@ -1,45 +1,21 @@
-## Agent Usage
-- Delegate bulk or multi-file operations (organize, mass move/copy/rename/delete) to the file-manager agent. Trivial single-file operations may be done inline.
-- Before dispatching any file-manager task, verify the destination path exists (a one-second `ls` beats a 45-second agent round-trip that bounces back with a question).
+# Desktop
 
-## Claude Code File Locations
-- **Global settings**: `C:\Users\{{USERNAME}}\.claude\settings.json`
-- **Project-local settings**: `C:\Users\{{USERNAME}}\Desktop\.claude\settings.local.json`
-- **Skills (slash commands)**: `C:\Users\{{USERNAME}}\.claude\commands\` (Markdown files, e.g., `sync-config.md`, `api-agent.md`)
-- **Agent definitions**: `C:\Users\{{USERNAME}}\.claude\agents\` (Markdown files, e.g., `file-manager.md`)
-- **Project instructions**: `C:\Users\{{USERNAME}}\Desktop\CLAUDE.md` (this file)
-- **Encrypted API key**: `C:\Users\{{USERNAME}}\.claude\.api-key.enc` (DPAPI-encrypted, same-user-only)
+Project instructions for sessions started on the Desktop, deployed to `<Desktop>\CLAUDE.md`.
 
-## Billing Modes
-- **Default (subscription)**: Pro plan. No `ANTHROPIC_API_KEY` set. 200K context limit.
-- **API mode**: Pay-as-you-go. Enables 1M token context via `--model modelname[1m]`.
-- **Toggle mechanism**: PowerShell functions `claude-api`, `claude-api-sp`, `claude-api-spsp` set the API key from the encrypted store and clean it up on exit.
-- **In-session API work**: Use `/api-agent` skill to shell out to a separate API-billed Claude process.
-- **Standalone script**: `Desktop\claude-config\claude-api.ps1` launches a full API-mode session with `-Extended`, `-SP`, `-SPSP` flags.
-- **System prompt**: `Desktop\claude-config\System Prompt.txt` — referenced by all `-sp`/`-spsp` variants.
+Claude reads this file only when a session starts here, so keep it to things that are true of
+this directory: which projects live on the Desktop, conventions they share, anything a session
+started elsewhere has no business knowing. Anything true regardless of where you start belongs in
+`$env:USERPROFILE\.claude\CLAUDE.md` instead — put it there and it is available in every session
+rather than only the ones that happen to begin on the Desktop.
 
-## MCP Server Management
-- **MCP Tool Search** is always on (`ENABLE_TOOL_SEARCH=true` user env var). Lazy-loads MCP tool definitions to save context.
-- Use `/mcp` in-session to toggle servers on/off without restarting.
-- Use `@` to browse available MCP resources in the prompt.
-- Run `claude mcp list` to see currently connected servers. Their tool definitions are lazy-loaded via Tool Search, so they don't consume active context until used.
-- Subagents inherit the parent session's MCP tools. Background subagents cannot use MCP tools.
-- To add new servers: `claude mcp add --transport http <name> <url>` (run outside Claude Code session).
+Procedures belong in neither file. A section that has grown into a sequence of steps should be a
+skill, where it costs no context until it is used.
 
-## Workflows (Dynamic Multi-Agent Orchestration)
-- `enableWorkflows` is **false by default** in global settings.json to keep the Workflow tool's large schema out of context. Workflows are NOT one of the 19 Tool-Search-deferred built-ins, so this setting is the only lever for it.
-- The setting **hot-reloads from settings.json on every request** — no restart needed. Both the Workflow tool schema and the call gate track the live value. The gate is checked only at launch time (a running background workflow is unaffected by later edits).
-- **On-demand enable (do this automatically):** When a task needs the Workflow tool (e.g. `/deep-research-tiered`, `/deep-research`, or any `.claude/workflows/*.js` script), FIRST set `"enableWorkflows": true` in `C:\Users\{{USERNAME}}\.claude\settings.json`, THEN call the Workflow tool on the next step (the schema appears in the rebuilt request).
-- **Restore lean default:** Once the workflow has launched, set `"enableWorkflows": false` again so future sessions stay lean.
-- **Alternative (no in-session edits):** launch a workflow-enabled session with `claude --settings "C:\Users\{{USERNAME}}\.claude\workflows-on.json"` (that file contains `{"enableWorkflows": true}` and overrides only that key).
+## What lives here
+- `{{CONFIG_ROOT}}` — this configuration repo.
 
-## Machine Notes (lessons from live sessions)
-- **Reduced motion**: check Windows → Accessibility → Visual effects → "Animation effects". When it is OFF, every browser on the machine reports `prefers-reduced-motion: reduce` and animated site features show their static fallbacks. If web animations mysteriously "don't play" in local browsers, check that setting first.
-- **Headless testing caveat**: Playwright contexts default to `reducedMotion: 'no-preference'` regardless of the OS setting — what a headless run verifies is not automatically what you see in your own browser. Verify both paths explicitly (`newContext({ reducedMotion: 'reduce' })` for the fallback).
-- **claude-in-chrome extension**: if its tools report "not connected," run `/mcp` (it reconnects in-session) — don't retry more than twice. Fallback that works well: `playwright-core` driving the installed Chrome (`chromium.launch({ channel: 'chrome' })`), which downloads no browser.
-- **Background dev servers**: stop `python -m http.server` (and similar) background tasks when the work phase ends; don't leave them running for someone else to clean up.
+<!-- Add your own Desktop projects and conventions below. -->
 
-## Bash ↔ PowerShell Escaping
-- Never pass complex PowerShell (containing `$variables`, `$null`, nested quotes) inline via `powershell.exe -Command "..."` from bash. Both shells fight over `$`.
-- Instead: write a temp `.ps1` file, run with `powershell.exe -ExecutionPolicy Bypass -File <path>`, then delete it.
-- Inline `-Command` is fine only for trivial commands with no `$` symbols.
+## Web work on this machine
+- **Reduced motion**: check Windows → Accessibility → Visual effects → "Animation effects". While it is OFF, every browser on the machine reports `prefers-reduced-motion: reduce` and animated site features show their static fallbacks. If a web animation mysteriously "doesn't play" locally, check that setting before debugging the animation.
+- **Headless caveat**: Playwright contexts default to `reducedMotion: 'no-preference'` regardless of the OS setting, so what a headless run verifies is not automatically what you see in your own browser. Verify both paths explicitly — `newContext({ reducedMotion: 'reduce' })` for the fallback.

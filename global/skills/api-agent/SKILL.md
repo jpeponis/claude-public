@@ -1,3 +1,8 @@
+---
+name: api-agent
+description: Run a prompt through a separate Claude Code process billed to the Anthropic API instead of the Pro subscription, which unlocks the 1M-token extended context window. Use when a task needs more context than the current session allows, when the work should not consume subscription usage, or when the user asks for API billing, pay-as-you-go, extended or 1M context.
+---
+
 # API-Billed Agent
 
 Run a prompt through a separate Claude Code process billed to the Anthropic API (pay-as-you-go), enabling features not available on the Pro subscription such as the 1M token context window.
@@ -7,7 +12,7 @@ Run a prompt through a separate Claude Code process billed to the Anthropic API 
 
 ## Options
 - `--1m` : Use the 1M token extended context window (appends `[1m]` to the model)
-- `--sp` : Include the custom system prompt from `$HOME/Desktop/claude-config/System Prompt.txt`
+- `--sp` : Include the custom system prompt from `{{CONFIG_ROOT}}/System Prompt.txt`
 - `--spsp` : Include the custom system prompt AND skip all permission prompts
 - `--model <name>` : Override the model (default: opus, an alias that always resolves to the current Opus). Combine with `--1m` for extended context.
 
@@ -15,7 +20,7 @@ Run a prompt through a separate Claude Code process billed to the Anthropic API 
 
 1. **Retrieve the API key** with the repo's one decrypt path, `Get-Secret.ps1`:
    ```
-   powershell -ExecutionPolicy Bypass -File "$HOME/Desktop/claude-config/Get-Secret.ps1" -Name api-key
+   powershell -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/Get-Secret.ps1" -Name api-key
    ```
    Store the result (the API key) for the next step. Do NOT display it to the user.
 
@@ -28,7 +33,7 @@ Run a prompt through a separate Claude Code process billed to the Anthropic API 
    - Base: `claude -p "<prompt>"`
    - If `--1m`: add `--model opus[1m]` (or `--model <name>[1m]` if `--model` was specified)
    - If `--model` without `--1m`: add `--model <name>`
-   - If `--sp` or `--spsp`: add `--append-system-prompt "$(cat "$HOME/Desktop/claude-config/System Prompt.txt")"` — bash syntax, because step 3 runs the command through Bash; a PowerShell `$(Get-Content ...)` substitution there is not evaluated by the shell that runs it
+   - If `--sp` or `--spsp`: add `--append-system-prompt "$(cat "{{CONFIG_ROOT}}/System Prompt.txt")"` — bash syntax, because step 3 runs the command through Bash; a PowerShell `$(Get-Content ...)` substitution there is not evaluated by the shell that runs it
    - If `--spsp`: also add `--dangerously-skip-permissions --permission-mode dontAsk`
 
 3. **Execute** the command via Bash with `ANTHROPIC_API_KEY=<key>` set as a prefix environment variable:

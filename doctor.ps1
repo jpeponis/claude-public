@@ -22,6 +22,8 @@ $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $claudeHome = Join-Path $env:USERPROFILE ".claude"
 $desktopDir = Get-DesktopPath
+$configRoot = Get-ConfigRoot -RepoRoot $repoRoot
+$desktopTok = Get-DesktopToken
 $plan       = Get-SyncPlan -ClaudeHome $claudeHome -DesktopDir $desktopDir
 
 $script:fails = 0
@@ -101,10 +103,8 @@ Section "Deployed content"
 
 foreach ($set in $plan.Dirs) {
     $repoDir = Join-Path $repoRoot $set.Repo
-    $repoNames  = @()
-    $localNames = @()
-    if (Test-Path $repoDir)    { $repoNames  = @(Get-ChildItem $repoDir -Filter $set.Filter -File | ForEach-Object Name) }
-    if (Test-Path $set.Local)  { $localNames = @(Get-ChildItem $set.Local -Filter $set.Filter -File | ForEach-Object Name) }
+    $repoNames  = @(Get-PlanFiles -Root $repoDir   -Filter $set.Filter -Recurse $set.Recurse | ForEach-Object RelPath)
+    $localNames = @(Get-PlanFiles -Root $set.Local -Filter $set.Filter -Recurse $set.Recurse | ForEach-Object RelPath)
 
     $missing = @($repoNames | Where-Object { $_ -notin $localNames })
     $extra   = @($localNames | Where-Object { $_ -notin $repoNames })
@@ -131,20 +131,19 @@ foreach ($map in $plan.Files) {
     $deployedPairs += @{ Repo = (Join-Path $repoRoot $map.Repo); Local = $map.Local; Label = $map.Repo }
 }
 foreach ($set in $plan.Dirs) {
-    $repoDir = Join-Path $repoRoot $set.Repo
-    if (-not (Test-Path $repoDir)) { continue }
-    foreach ($f in (Get-ChildItem $repoDir -Filter $set.Filter -File)) {
+    foreach ($f in (Get-PlanFiles -Root (Join-Path $repoRoot $set.Repo) -Filter $set.Filter -Recurse $set.Recurse)) {
         $deployedPairs += @{
             Repo  = $f.FullName
-            Local = (Join-Path $set.Local $f.Name)
-            Label = (Join-Path $set.Repo $f.Name)
+            Local = (Join-Path $set.Local $f.RelPath)
+            Label = (Join-Path $set.Repo $f.RelPath)
         }
     }
 }
 
 foreach ($p in $deployedPairs) {
     if (-not (Test-Path $p.Repo) -or -not (Test-Path $p.Local)) { continue }   # absence reported above
-    $expected = Expand-UserName -Text (Get-Content $p.Repo -Raw -Encoding UTF8) -UserName $env:USERNAME
+    $expected = Expand-Tokens -Text (Get-Content $p.Repo -Raw -Encoding UTF8) `
+                              -UserName $env:USERNAME -ConfigRoot $configRoot -Desktop $desktopTok
     if ((Get-Content $p.Local -Raw -Encoding UTF8) -ne $expected) { $drifted += $p.Label }
 }
 
@@ -291,6 +290,112 @@ if ($nonAscii.Count -eq 0) {
     Check OK "all repo .ps1 files are pure ASCII (parse identically in PowerShell 5.1 and 7)"
 } else {
     Check FAIL "non-ASCII in: $($nonAscii -join ', ')" "replace non-ASCII characters (em-dashes are the usual culprit) with ASCII"
+}
+
+# --- Invariants about the CONTENT this repo ships ---------------------------
+# Everything above this point checks mechanism: does the file exist, parse, match,
+# decrypt. All of it can be green while the shipped content is wrong in ways that
+# matter more -- and both checks below are here because it WAS.
+#
+# Neither of these is hypothetical or stylistic. They are the two defects that
+# survived every mechanical check this script already had.
+Section "Synced content"
+
+$skillSet = @($plan.Dirs | Where-Object { $_.Name -eq 'skills' })[0]
+
+if (-not $skillSet) {
+    Check WARN "no skills set in the sync plan"
+} else {
+    $skillRoot = Join-Path $repoRoot $skillSet.Repo
+    $skillDirs = @()
+    if (Test-Path $skillRoot) { $skillDirs = @(Get-ChildItem $skillRoot -Directory) }
+
+    # A skill's `description` is how Claude decides whether to reach for it. When it is
+    # absent the listing falls back to the first paragraph of markdown, so a skill whose
+    # file opens with a title heading advertises itself as, exactly, that title -- which
+    # says nothing about when the skill applies. Such a skill is invocable by name and
+    # undiscoverable by the model, and nothing else reports the difference.
+    $noDescription = @()
+    $noSkillFile   = @()
+    foreach ($d in $skillDirs) {
+        $skillFile = Join-Path $d.FullName 'SKILL.md'
+        if (-not (Test-Path $skillFile)) { $noSkillFile += $d.Name; continue }
+        $text = Get-Content $skillFile -Raw -Encoding UTF8
+        $fm = [regex]::Match($text, '(?ms)\A---\s*\r?\n(.*?)\r?\n---\s*\r?\n')
+        if (-not $fm.Success -or $fm.Groups[1].Value -notmatch '(?m)^description:\s*\S') {
+            $noDescription += $d.Name
+        }
+    }
+
+    if ($skillDirs.Count -eq 0) {
+        Check WARN "repo ships no skills"
+    } elseif ($noSkillFile.Count -gt 0) {
+        Check FAIL "skill director(ies) with no SKILL.md: $($noSkillFile -join ', ')" "a skill directory without SKILL.md produces no slash command"
+    } elseif ($noDescription.Count -gt 0) {
+        Check FAIL "skill(s) with no frontmatter description: $($noDescription -join ', ')" "add 'description:' to SKILL.md -- without it Claude only sees the first paragraph"
+    } else {
+        Check OK "all $($skillDirs.Count) skills declare a description"
+    }
+}
+
+# The repo path, spelled literally, in a file that gets DEPLOYED. Prose is executed
+# here -- a skill saying 'run $HOME/Desktop/claude-config/x.ps1' sends Claude to a path
+# that does not exist on any machine with OneDrive Known Folder Move. This is the same
+# bug Get-DesktopPath fixed in the .ps1 files, and it lived on in the markdown for
+# months precisely because no check looked at prose. {{CONFIG_ROOT}} is the fix; this
+# is what keeps it from rotting back.
+$literalPathHits = @()
+$syncedRepoPaths = @($plan.Files | ForEach-Object { Join-Path $repoRoot $_.Repo })
+foreach ($set in $plan.Dirs) {
+    $syncedRepoPaths += @(Get-PlanFiles -Root (Join-Path $repoRoot $set.Repo) -Filter $set.Filter -Recurse $set.Recurse |
+        ForEach-Object FullName)
+}
+foreach ($f in ($syncedRepoPaths | Where-Object { $_ -like '*.md' -and (Test-Path $_) })) {
+    $n = 0
+    foreach ($line in [System.IO.File]::ReadAllLines($f)) {
+        $n++
+        if ($line -match '(?i)Desktop[\\/]+claude-(config|scratch)') {
+            $literalPathHits += "$($f.Substring($repoRoot.Length + 1)):$n"
+        }
+    }
+}
+
+if ($literalPathHits.Count -eq 0) {
+    Check OK "no synced markdown hardcodes a Desktop path (they use {{CONFIG_ROOT}} / {{DESKTOP}})"
+} else {
+    Check FAIL "literal Desktop path in: $($literalPathHits -join ', ')" "use {{CONFIG_ROOT}} or {{DESKTOP}}, which deploy.ps1 expands per machine"
+}
+
+# research-worker.md deliberately carries the same prompt as "System Prompt.txt", so that
+# spawned workers hold the same disposition the session does. It is the one duplication
+# here kept on purpose -- and a deliberate copy is no less prone to drifting than an
+# accidental one, since nothing about editing either file mentions the other.
+#
+# Checked as a SUBSET rather than an exact match, because the worker legitimately omits
+# the opening line, which addresses the session model. Every line the worker DOES carry
+# must read the way the system prompt reads it. This catches the drift from either side:
+# editing "System Prompt.txt" and forgetting the agent fails just as loudly.
+$promptPath = Join-Path $repoRoot 'System Prompt.txt'
+$workerPath = Join-Path $repoRoot 'global\agents\research-worker.md'
+
+if (-not (Test-Path $promptPath) -or -not (Test-Path $workerPath)) {
+    Check WARN "cannot compare the worker prompt: System Prompt.txt or research-worker.md is missing"
+} else {
+    $promptLines = @([System.IO.File]::ReadAllLines($promptPath) | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $workerAll   = @([System.IO.File]::ReadAllLines($workerPath))
+    $fmEnd       = [array]::IndexOf($workerAll, '---', 1)
+    $workerLines = @($workerAll[($fmEnd + 1)..($workerAll.Count - 1)] | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $orphans     = @($workerLines | Where-Object { $_ -notin $promptLines })
+
+    if ($fmEnd -lt 1) {
+        Check FAIL "research-worker.md has no frontmatter block" "an agent definition needs name/description/tools frontmatter"
+    } elseif ($orphans.Count -eq 0) {
+        Check OK "research-worker's prompt matches System Prompt.txt ($($workerLines.Count) lines, subset)"
+    } else {
+        $sample = $orphans[0]
+        if ($sample.Length -gt 60) { $sample = $sample.Substring(0, 60) + '...' }
+        Check FAIL "research-worker's prompt has drifted from System Prompt.txt in $($orphans.Count) line(s) -- first: `"$sample`"" "reconcile the two; they are the same prompt by design"
+    }
 }
 
 # --- Summary ----------------------------------------------------------------
