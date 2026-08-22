@@ -1,31 +1,92 @@
-# collect.ps1 -- Collect local Claude Code config into repo with username parameterized
-# Usage: powershell -ExecutionPolicy Bypass -File collect.ps1
+# collect.ps1 -- Collect local agent config (Claude + Codex) into the repo with the
+# username parameterized.
+# Usage:
+#   powershell -ExecutionPolicy Bypass -File collect.ps1
+#   powershell -ExecutionPolicy Bypass -File collect.ps1 -Force   # skip the divergence guard
 #
 # What gets collected, and what is deliberately left out, is described once in
-# Get-SyncPlan (lib\Common.ps1) and shared with deploy.ps1 and doctor.ps1.
+# Get-ArtifactManifest (lib\Common.ps1) and shared with deploy.ps1 and doctor.ps1.
+# Only installed-authoritative artifacts are collected; repository-authoritative
+# ones (the generated AGENTS.md files) are rebuilt from their sources at the end.
+
+[CmdletBinding()]
+param(
+    # Skip the multi-machine divergence guard. Only for the case the guard names:
+    # you have looked at the conflicting artifact and this machine's copy is the one
+    # that should win.
+    [switch]$Force
+)
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $repoRoot "lib\Common.ps1")
 
-$username = $env:USERNAME
+$username   = $env:USERNAME
 $claudeHome = Join-Path $env:USERPROFILE ".claude"
+$codexHome  = Join-Path $env:USERPROFILE ".codex"
+$agentsHome = Join-Path $env:USERPROFILE ".agents"
 $desktopDir = Get-DesktopPath
-$plan = Get-SyncPlan -ClaudeHome $claudeHome -DesktopDir $desktopDir
+$configRoot = Get-ConfigRoot -RepoRoot $repoRoot
+$desktopTok = Get-DesktopToken
+$manifest   = Get-ArtifactManifest -ClaudeHome $claudeHome -CodexHome $codexHome -AgentsHome $agentsHome -DesktopDir $desktopDir
+Test-ArtifactManifest -Manifest $manifest -RepoRoot $repoRoot
 
-# The reverse of deploy's {{CONFIG_ROOT}} expansion. Both spellings are collapsed
-# because a deployed file may legitimately contain either: Get-ConfigRoot emits the
-# forward-slashed form, but a human editing ~/.claude/skills/foo/SKILL.md by hand will
-# type whichever their shell showed them. Tokenizing only one of the two would leave
-# the other as a hardcoded local path, which is the exact failure this token prevents.
+# --- Divergence guard: do not silently overwrite another machine's work -------
+# push runs pull -> collect -> commit. On a machine whose DEPLOYED tree is stale, the
+# pull brings down another machine's newer files and this collect would immediately
+# overwrite them with the old installed copies -- git then sees a clean, plausible
+# commit, not a conflict. deploy.ps1 records the commit it deployed in .last-deployed
+# (machine-local, untracked); any managed repo path that changed between that commit
+# and HEAD while ALSO disagreeing with this machine's installed copy is exactly that
+# collision, and collecting through it is data loss.
 #
-# Order matters, and only in this direction: the Desktop is a prefix of the config
-# root, so tokenizing it first would leave '{{DESKTOP}}/claude-config' behind and the
-# longer token would never match again.
-$replacements = @(
-    @{ Token = '{{CONFIG_ROOT}}'; Value = (Get-ConfigRoot -RepoRoot $repoRoot) }
-    @{ Token = '{{DESKTOP}}';     Value = (Get-DesktopToken) }
-)
+# The fix the message prescribes is deploy (take the repo's newer version), because
+# that is almost always right. -Force is for the deliberate exception.
+$lastDeployedPath = Join-Path $repoRoot '.last-deployed'
+if (-not $Force -and (Test-Path $lastDeployedPath)) {
+    $base = (Get-Content $lastDeployedPath -Raw -Encoding UTF8).Trim()
+    $changed = @()
+    $gitOk = $false
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $changed = @(& git -C $repoRoot diff --name-only "$base" HEAD 2>$null | Where-Object { $_ })
+        if ($LASTEXITCODE -eq 0) { $gitOk = $true }
+    } catch { }
+    finally { $ErrorActionPreference = $previousEap }
+
+    if (-not $gitOk) {
+        Write-Host "[WARN] divergence guard: cannot diff against last-deployed commit $base (rebased or gc'd?); proceeding without it" -ForegroundColor Yellow
+    } elseif ($changed.Count -gt 0) {
+        $conflicts = @()
+        foreach ($c in (Get-DivergenceCandidates -ChangedRepoPaths $changed -Manifest $manifest)) {
+            $repoPath  = Join-Path $repoRoot ($c.RepoPath.Replace('/', '\'))
+            $repoHas   = Test-Path $repoPath
+            $localHas  = Test-Path $c.LocalPath
+            if ($repoHas -and $localHas) {
+                $expected = Expand-Tokens -Text (Get-Content $repoPath -Raw -Encoding UTF8) `
+                                          -UserName $username -ConfigRoot $configRoot -Desktop $desktopTok
+                if ((Get-Content $c.LocalPath -Raw -Encoding UTF8) -ne $expected) {
+                    $conflicts += "$($c.RepoPath) (repo and installed copies both changed)"
+                }
+            } elseif ($repoHas) {
+                $conflicts += "$($c.RepoPath) (new in repo, not yet deployed here -- collect would delete it)"
+            } elseif ($localHas) {
+                $conflicts += "$($c.RepoPath) (deleted in repo, still installed here -- collect would resurrect it)"
+            }
+        }
+        if ($conflicts.Count -gt 0) {
+            Write-Host ""
+            Write-Host "REFUSING to collect: the repo moved past this machine's last deploy, and these" -ForegroundColor Red
+            Write-Host "managed artifacts disagree with the installed copies:" -ForegroundColor Red
+            foreach ($x in $conflicts) { Write-Host "  $x" -ForegroundColor Red }
+            Write-Host ""
+            Write-Host "Run deploy.ps1 first to take the repo's version (your copy is backed up)," -ForegroundColor DarkGray
+            Write-Host "or re-run collect.ps1 -Force if this machine's copy should deliberately win." -ForegroundColor DarkGray
+            exit 1
+        }
+    }
+}
 
 # --- Settings the repo owns, which collect must not overwrite from this machine ---
 # A collected file is normally a faithful snapshot of whatever is live. 'model' is the
@@ -135,17 +196,9 @@ function Copy-Parameterized {
     # Machine paths -> tokens, before the username pass and regardless of any marker.
     # The marker exempts a file from having its ACCOUNT NAME tokenized because that name
     # may be a GitHub login; it says nothing about paths, and a machine path is
-    # machine-specific under every reading.
-    #
-    # Both slash spellings are collapsed because a deployed file may legitimately hold
-    # either: deploy writes the forward-slashed form, but a human editing
-    # ~/.claude/skills/foo/SKILL.md by hand types whatever their shell showed them.
-    # Tokenizing only one would leave the other as a hardcoded local path -- the exact
-    # failure these tokens exist to prevent.
-    foreach ($r in $replacements) {
-        $content = $content -replace [regex]::Escape($r.Value), $r.Token
-        $content = $content -replace [regex]::Escape($r.Value.Replace('/', '\')), $r.Token
-    }
+    # machine-specific under every reading. The slash-spelling and ordering rules live
+    # with the function, beside Expand-Tokens, so the two directions round-trip.
+    $content = ConvertTo-RepoTokens -Text $content -ConfigRoot $configRoot -Desktop $desktopTok
 
     $note = ''
     if ($content -match [regex]::Escape($UserNameLiteralMarker)) {
@@ -167,18 +220,30 @@ function Copy-Parameterized {
     $script:collected++
 }
 
-# Process individual files
-foreach ($map in $plan.Files) {
-    Copy-Parameterized -SrcPath $map.Local -DestPath (Join-Path $repoRoot $map.Repo) -Label $map.Repo
+# Membership is computed ONCE, against the repo tree as it stood before this run,
+# so every artifact filters against the same snapshot regardless of processing order:
+# a shared skill deleted locally (and therefore from shared\skills below) must still
+# be excluded from claude-skills in the same run, not re-collected there.
+$memberIndex = @{}
+foreach ($dir in $manifest.Dirs) {
+    $memberIndex[$dir.Id] = @(Get-ArtifactMembers -RepoRoot $repoRoot -Artifact $dir)
+}
+
+# Process individual files. Repository-authoritative artifacts are never collected --
+# the generated AGENTS.md files are rebuilt from their sources at the end of this run.
+foreach ($map in $manifest.Files) {
+    if ($map.Authority -ne 'installed') { continue }
+    Copy-Parameterized -SrcPath $map.CollectFrom -DestPath (Join-Path $repoRoot $map.Repo) -Label $map.Repo
 }
 
 # Process directories
-foreach ($dir in $plan.Dirs) {
-    if (-not (Test-Path $dir.Local)) {
-        Write-Host "[SKIP] $($dir.Local) (directory not found)" -ForegroundColor Yellow
+foreach ($dir in $manifest.Dirs) {
+    if ($dir.Authority -ne 'installed') { continue }
+    if (-not (Test-Path $dir.CollectFrom)) {
+        if (-not $dir.Optional) { Write-Host "[SKIP] $($dir.CollectFrom) (directory not found)" -ForegroundColor Yellow }
         continue
     }
-    $files = Get-PlanFiles -Root $dir.Local -Filter $dir.Filter -Recurse $dir.Recurse
+    $files = Select-ArtifactLocalFiles -Artifact $dir -MemberIndex $memberIndex
     $localRel = @($files | ForEach-Object { $_.RelPath })
     foreach ($file in $files) {
         $relDest = Join-Path $dir.Repo $file.RelPath
@@ -187,7 +252,7 @@ foreach ($dir in $plan.Dirs) {
 
     # Remove repo files that no longer exist locally. Compared on the path relative to
     # the set root, not the filename: every skill's file is named SKILL.md, so a
-    # name-only comparison would consider all seven of them the same file.
+    # name-only comparison would consider all of them the same file.
     $repoDir = Join-Path $repoRoot $dir.Repo
     foreach ($rf in (Get-PlanFiles -Root $repoDir -Filter $dir.Filter -Recurse $dir.Recurse)) {
         if ($rf.RelPath -notin $localRel) {
@@ -207,6 +272,16 @@ foreach ($dir in $plan.Dirs) {
                 Remove-Item $_.FullName -Force
                 Write-Host "[DEL]  $(Join-Path $dir.Repo $_.Name)\ (empty)" -ForegroundColor Red
             }
+    }
+}
+
+# --- Rebuild generated artifacts from their freshly collected sources ---------
+# After collection so the derived AGENTS.md files always track the CLAUDE.md content
+# that was just brought in. These outputs are repository-authoritative: they deploy
+# outward, and editing one in place is reported by doctor rather than adopted here.
+foreach ($g in (Update-GeneratedArtifacts -RepoRoot $repoRoot -Manifest $manifest)) {
+    if ($g.State -eq 'rebuilt') {
+        Write-Host "[GEN]  $($g.Label) (rebuilt from sources)" -ForegroundColor Green
     }
 }
 

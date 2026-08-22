@@ -1,6 +1,9 @@
 # Backups created by deploy.ps1
 .backups/
 
+# Machine-local divergence-guard base (the commit this machine last deployed)
+.last-deployed
+
 # Sensitive files — NEVER commit
 *.enc
 .credentials*

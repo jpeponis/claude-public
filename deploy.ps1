@@ -1,11 +1,15 @@
-# deploy.ps1 -- Deploy repo Claude Code config to local machine with username resolved
+# deploy.ps1 -- Deploy repo agent config (Claude + Codex) to the local machine with
+# the username resolved.
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File deploy.ps1
 #   powershell -ExecutionPolicy Bypass -File deploy.ps1 -DryRun          # preview, write nothing
 #   powershell -ExecutionPolicy Bypass -File deploy.ps1 -KeepBackups 40  # keep more history
 #
 # What gets deployed, and what is deliberately left out, is described once in
-# Get-SyncPlan (lib\Common.ps1) and shared with collect.ps1 and doctor.ps1.
+# Get-ArtifactManifest (lib\Common.ps1) and shared with collect.ps1 and doctor.ps1.
+# A multi-destination artifact deploys to every destination; if any write fails, the
+# whole run rolls back from this run's backups rather than leaving a half-updated
+# machine.
 
 [CmdletBinding()]
 param(
@@ -21,14 +25,28 @@ $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $username   = $env:USERNAME
 $claudeHome = Join-Path $env:USERPROFILE ".claude"
+$codexHome  = Join-Path $env:USERPROFILE ".codex"
+$agentsHome = Join-Path $env:USERPROFILE ".agents"
 $desktopDir = Get-DesktopPath
 $configRoot = Get-ConfigRoot -RepoRoot $repoRoot
 $desktopTok = Get-DesktopToken
-$plan       = Get-SyncPlan -ClaudeHome $claudeHome -DesktopDir $desktopDir
+$plan       = Get-ArtifactManifest -ClaudeHome $claudeHome -CodexHome $codexHome -AgentsHome $agentsHome -DesktopDir $desktopDir
+Test-ArtifactManifest -Manifest $plan -RepoRoot $repoRoot
 
 # Files this script has deployed before. Pruning is limited to this list so a
 # user's own skills/agents are never deleted just for being unknown to the repo.
+# Read up front: it also tells the adoption notice below which existing files this
+# script has never touched.
 $deployedManifestPath = Join-Path $claudeHome ".deployed-manifest.json"
+$previousDests = @()
+if (Test-Path $deployedManifestPath) {
+    try {
+        $previousDests = @((Get-Content $deployedManifestPath -Raw | ConvertFrom-Json).deployed)
+    } catch {
+        Write-Host "[WARN] Could not read $deployedManifestPath; prune and adoption notices are off this run." -ForegroundColor Yellow
+        $previousDests = @()
+    }
+}
 
 function Say {
     param([string]$Text, [string]$Color = 'Gray', [switch]$Plan)
@@ -47,18 +65,30 @@ function Copy-ToBackup {
 
 # --- Build flat list of all source->dest pairs for backup and deploy ---
 # Label doubles as the path each file takes inside a backup directory, so it must be
-# unique across the whole run; the repo-relative path already is.
+# unique across the whole run. The repo-relative path covers the first destination;
+# a multi-destination artifact's further projections get a 'proj<i>\' prefix, since
+# the same repo file lands at two places and both may need backing up.
 $allPairs = @()
 
 foreach ($map in $plan.Files) {
-    $allPairs += @{ Source = (Join-Path $repoRoot $map.Repo); Dest = $map.Local; Label = $map.Repo }
+    $dests = @($map.Destinations)
+    for ($i = 0; $i -lt $dests.Count; $i++) {
+        $label = if ($i -eq 0) { $map.Repo } else { Join-Path "proj$i" $map.Repo }
+        $allPairs += @{ Source = (Join-Path $repoRoot $map.Repo); Dest = $dests[$i]; Label = $label }
+    }
 }
 foreach ($dir in $plan.Dirs) {
-    foreach ($file in (Get-PlanFiles -Root (Join-Path $repoRoot $dir.Repo) -Filter $dir.Filter -Recurse $dir.Recurse)) {
-        $allPairs += @{
-            Source = $file.FullName
-            Dest   = (Join-Path $dir.Local $file.RelPath)
-            Label  = (Join-Path $dir.Repo $file.RelPath)
+    $repoFiles = @(Get-PlanFiles -Root (Join-Path $repoRoot $dir.Repo) -Filter $dir.Filter -Recurse $dir.Recurse)
+    $dests = @($dir.Destinations)
+    for ($i = 0; $i -lt $dests.Count; $i++) {
+        foreach ($file in $repoFiles) {
+            $rel = Join-Path $dir.Repo $file.RelPath
+            $label = if ($i -eq 0) { $rel } else { Join-Path "proj$i" $rel }
+            $allPairs += @{
+                Source = $file.FullName
+                Dest   = (Join-Path $dests[$i] $file.RelPath)
+                Label  = $label
+            }
         }
     }
 }
@@ -99,48 +129,74 @@ if ($backupEntries.Count -gt 0) {
 }
 
 # --- Deploy files ---
+# The whole write phase is transactional against this run's backups: if any write
+# throws, every file already written is put back (from backup) or removed (if it did
+# not exist before), and the failure is rethrown. A half-updated machine that doctor
+# can detect but nothing can undo is exactly what the backup directory exists to
+# prevent -- so use it at the moment it matters, not only on request.
 $written   = 0
 $unchanged = 0
 $skipped   = 0
 $deleted   = 0
+$adopted   = 0
 $deployedDests = @()
+$writtenPairs  = @()
 
-foreach ($pair in $allPairs) {
-    if ($pair.Missing) {
-        Say "[SKIP] $($pair.Label) (not in repo)" 'Yellow'
-        $skipped++
-        continue
+try {
+    foreach ($pair in $allPairs) {
+        if ($pair.Missing) {
+            Say "[SKIP] $($pair.Label) (not in repo)" 'Yellow'
+            $skipped++
+            continue
+        }
+
+        $deployedDests += $pair.Dest
+
+        if (-not $pair.Changed) {
+            Say "[SAME] $($pair.Label)" 'DarkGray'
+            $unchanged++
+            continue
+        }
+
+        # Adoption notice: this destination exists, differs, and no previous deploy of
+        # ours ever wrote it -- we are about to take over a file something else put
+        # there (a pre-existing AGENTS.md, a hand-made agent). The backup taken above
+        # preserves it; the notice is so the takeover is a decision someone saw.
+        if ($pair.Existed -and $previousDests.Count -gt 0 -and ($pair.Dest -notin $previousDests)) {
+            Say "[ADPT] $($pair.Label) -- existing file not previously managed; original kept in .backups\$timestamp\" 'Yellow' -Plan
+            $adopted++
+        }
+
+        if ($DryRun) {
+            Say "[OK]   $($pair.Label) -> $($pair.Dest)" 'Green' -Plan
+        } else {
+            Write-TextFile -Path $pair.Dest -Content $pair.Content
+            $writtenPairs += $pair
+            Say "[OK]   $($pair.Label) -> $($pair.Dest)" 'Green'
+        }
+        $written++
     }
-
-    $deployedDests += $pair.Dest
-
-    if (-not $pair.Changed) {
-        Say "[SAME] $($pair.Label)" 'DarkGray'
-        $unchanged++
-        continue
+} catch {
+    Say "" 'Red'
+    Say "DEPLOY FAILED: $($_.Exception.Message)" 'Red'
+    Say "Rolling back the $($writtenPairs.Count) file(s) this run already wrote..." 'Yellow'
+    foreach ($p in $writtenPairs) {
+        $bak = Join-Path $backupDir $p.Label
+        if (Test-Path $bak) {
+            Copy-Item $bak $p.Dest -Force
+            Say "  restored $($p.Label)" 'Yellow'
+        } elseif (-not $p.Existed) {
+            Remove-Item $p.Dest -Force -ErrorAction SilentlyContinue
+            Say "  removed  $($p.Label) (did not exist before this run)" 'Yellow'
+        }
     }
-
-    if ($DryRun) {
-        Say "[OK]   $($pair.Label) -> $($pair.Dest)" 'Green' -Plan
-    } else {
-        Write-TextFile -Path $pair.Dest -Content $pair.Content
-        Say "[OK]   $($pair.Label) -> $($pair.Dest)" 'Green'
-    }
-    $written++
+    throw
 }
 
 # --- Prune files this repo previously deployed and no longer ships -----------
-# Bounded by the previous run's manifest. A file we never deployed is never deleted,
-# so a user's own commands/my-thing.md survives; a skill removed from the repo does not.
-$previousDests = @()
-if (Test-Path $deployedManifestPath) {
-    try {
-        $previousDests = @((Get-Content $deployedManifestPath -Raw | ConvertFrom-Json).deployed)
-    } catch {
-        Say "[WARN] Could not read $deployedManifestPath; skipping prune this run." 'Yellow'
-        $previousDests = @()
-    }
-}
+# Bounded by the previous run's manifest (read above). A file we never deployed is
+# never deleted, so a user's own commands/my-thing.md survives; a skill removed from
+# the repo does not.
 
 foreach ($stale in ($previousDests | Where-Object { $_ -and ($_ -notin $deployedDests) })) {
     if (-not (Test-Path $stale)) { continue }
@@ -174,6 +230,27 @@ if (-not $DryRun) {
     Write-TextFile -Path $deployedManifestPath -Content (
         [ordered]@{ updated = (Get-Date -Format 'o'); deployed = $deployedDests } | ConvertTo-Json -Depth 5
     )
+
+    # Machine-local repo pointers: the function files resolve the repo through the
+    # '.config-root' beside them instead of assuming <Desktop>\claude-config, so an
+    # install anywhere still finds "System Prompt.txt" and Get-Secret.ps1. Written
+    # every deploy; never synced, never pruned (not in the artifact manifest).
+    foreach ($targetHome in @($claudeHome, $codexHome)) {
+        Write-TextFile -Path (Join-Path $targetHome '.config-root') -Content $repoRoot
+    }
+
+    # The divergence-guard base: which commit this machine's installed tree now
+    # reflects. collect.ps1 refuses to overwrite repo changes that landed after this
+    # commit while the installed copy disagrees. Untracked; meaningful only here.
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $head = (& git -C $repoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+        if ($LASTEXITCODE -eq 0 -and $head) {
+            Write-TextFile -Path (Join-Path $repoRoot '.last-deployed') -Content ([string]$head).Trim()
+        }
+    } catch { }
+    finally { $ErrorActionPreference = $previousEap }
 }
 
 # --- Retention: keep the newest $KeepBackups timestamped backups -------------
@@ -192,15 +269,17 @@ if ($oldBackups.Count -gt 0 -and -not $DryRun) {
 }
 
 Write-Host ""
-Say "Wrote $written files, unchanged $unchanged, skipped $skipped, pruned $deleted." 'Cyan' -Plan
+$adoptNote = ""
+if ($adopted -gt 0) { $adoptNote = ", adopted $adopted" }
+Say "Wrote $written files, unchanged $unchanged, skipped $skipped, pruned $deleted$adoptNote." 'Cyan' -Plan
 
 # --- PowerShell profiles: additive, and BOTH editions ------------------------
 # Windows PowerShell 5.1 and PowerShell 7+ read different profile paths. Wiring only
-# one leaves the claude-* functions undefined in the other, which is silent: deploy
-# reports success and the functions simply do not exist. So inject into every profile
-# path we can find, and never rewrite anything outside our markers.
+# one leaves the claude-*/codex-* functions undefined in the other, which is silent:
+# deploy reports success and the functions simply do not exist. So inject into every
+# profile path we can find, and never rewrite anything outside our markers.
 Write-Host ""
-Say "PowerShell profiles (dot-source claude-functions.ps1):" 'Cyan'
+Say "PowerShell profiles (dot-source the claude/codex function files):" 'Cyan'
 foreach ($profilePath in @(Get-ProfilePaths)) {
     $result = Add-ClaudeProfileBlock -Path $profilePath -DryRun:$DryRun -BackupDir $backupDir
     $color = if ($result -eq 'unchanged') { 'DarkGray' } else { 'Green' }

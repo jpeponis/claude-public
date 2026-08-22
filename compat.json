@@ -1,0 +1,7 @@
+{
+  "_comment": "Version-compatibility gate for version-sensitive surfaces (file profiles, model_instructions_file replacement, agent TOML). doctor.ps1 FAILS below min and WARNS above certified until the canary checks pass on the new version; then raise certified here and push.",
+  "codex": {
+    "min": "0.149.0",
+    "certified": "0.149.0"
+  }
+}
