@@ -1,6 +1,6 @@
 # apply-terminal-keybinding.ps1 -- Ensure Windows Terminal sends a newline on Shift+Enter
 #
-# Repo-native (like claude-api.ps1): NOT collected from any machine. It injects a fixed,
+# Repo-native (like stripe-api.ps1): NOT collected from any machine. It injects a fixed,
 # known action + keybinding into whatever Windows Terminal settings.json exists locally.
 #
 # Why injection instead of whole-file sync:
