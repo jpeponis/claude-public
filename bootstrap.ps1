@@ -371,7 +371,7 @@ Write-Host @"
   2. Run:  claude-sp
      Claude Code with the custom system prompt, permissions in auto mode. This is
      the main way in; read the README before trying claude-spsp.
-  3. Inside Claude Code, /sync-config and /api-agent should be in the slash command
+  3. Inside Claude Code, /sync-config and /deep-research-tiered should be in the slash command
      list, and the file-manager agent should be available. The skills behind those
      commands are directories under ~/.claude/skills/, one per command.
 "@

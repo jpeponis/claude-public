@@ -14,13 +14,12 @@ notes live in `{{DESKTOP}}/CLAUDE.md`; how the config is synced is in `{{CONFIG_
 
 ## Billing modes
 - **Default (subscription)**: no `ANTHROPIC_API_KEY` set, 200K context.
-- **API mode**: pay-as-you-go, and the only way to get the 1M context window (`--model <name>[1m]`).
-- Shell functions `claude-api`, `claude-api-sp`, `claude-api-spsp` set the key from the encrypted store and clear it on exit. `{{CONFIG_ROOT}}/claude-api.ps1` is the standalone equivalent (`-Extended`, `-SP`, `-SPSP`).
-- In-session, the `/api-agent` skill shells a single prompt out to a separate API-billed process.
-- `claude-sp` **replaces** the default system prompt (`--system-prompt-file`); `claude-api-sp` **appends** to it (`--append-system-prompt-file`). The asymmetry is deliberate.
+- **OpenRouter mode**: `claude-or`, `claude-or-sp`, `claude-or-spsp` route the whole session through OpenRouter's Anthropic-compatible endpoint (`ANTHROPIC_BASE_URL=https://openrouter.ai/api`, auth token from the `openrouter-key` secret) with gateway model discovery on, so `/model` lists the OpenRouter catalog. Everything in such a session — Claude models included — bills the OpenRouter key; the subscription sits idle there.
+- The endpoint is session-wide: the main model and every native subagent share it. Mixing providers inside one subscription-billed session is done by shelling out to other vendors' CLIs, not through `ANTHROPIC_BASE_URL`.
+- `claude-sp` **replaces** the default system prompt (`--system-prompt-file`); `claude-or-sp` **appends** to it (`--append-system-prompt-file`). The asymmetry is deliberate.
 
 ## MCP
-- Tool Search is on via the `ENABLE_TOOL_SEARCH=true` User env var, which `deploy.ps1` sets, so MCP tool definitions load lazily and cost no context until used.
+- Tool Search is on via the `ENABLE_TOOL_SEARCH=true` User env var, which `deploy.ps1` sets, so MCP tool definitions load lazily and cost no context until used. Exception: `claude-or` drops the variable for its session — deferred tools are Anthropic-only, and non-Anthropic models 400 on them — so OpenRouter sessions load every tool definition eagerly and pay the context cost.
 - `/mcp` toggles servers in-session without restarting; `@` browses MCP resources; `claude mcp list` shows what is connected. Add servers with `claude mcp add --transport http <name> <url>`, run outside a session.
 - Subagents inherit the parent session's MCP tools. Background subagents cannot use them at all.
 

@@ -16,7 +16,7 @@ setup — feel free to fork, adapt, and add your own skills, agents, and workflo
   - `agents/` — Agent definitions (file-manager, for bulk file operations that would otherwise
     eat the main context; research-worker, the minimal-context worker used by
     deep-research-tiered)
-  - `skills/<name>/SKILL.md` — Skills, one directory each (sync-config, api-agent,
+  - `skills/<name>/SKILL.md` — Skills, one directory each (sync-config,
     deep-research-tiered). The directory name is the slash command, and the whole directory
     syncs, so a skill can carry the scripts and reference files it depends on
 - `project-desktop/` — Maps to your Desktop (project-level config). Resolved with
@@ -27,7 +27,8 @@ setup — feel free to fork, adapt, and add your own skills, agents, and workflo
   - `.claude/settings.local.json` — Project-local settings
   - `.claude/workflows/` — Dynamic workflow scripts (`*.js`, e.g. deep-research-tiered)
 - `powershell/claude-functions.ps1` — Maps to `%USERPROFILE%\.claude\`, dot-sourced by both
-  PowerShell profiles. Defines `claude-sp`, `claude-spsp`, and the `claude-api*` launchers.
+  PowerShell profiles. Defines `claude-sp`, `claude-spsp`, the `claude-or*` launchers, and
+  `codex-sp`.
 - `bootstrap.ps1` — One-command install: forks, clones, deploys, verifies (public-repo native)
 - `collect.ps1` — Gather local config into repo (parameterizes username)
 - `deploy.ps1` — Deploy repo config to local machine (inserts local username)
@@ -42,7 +43,6 @@ setup — feel free to fork, adapt, and add your own skills, agents, and workflo
   collect, deploy and doctor), file enumeration, token substitution, profile discovery,
   managed-block injection, backup enumeration, JSON validation
 - `System Prompt.txt` — Custom system prompt (repo-native, not collected/deployed)
-- `claude-api.ps1` — Standalone API-mode launcher (repo-native)
 - `apply-terminal-keybinding.ps1` — Repo-native; injects a Shift+Enter→newline action into the
   local Windows Terminal `settings.json`. Run automatically at the end of `deploy.ps1`.
 
@@ -120,7 +120,7 @@ half-installing.
    ```
    - Settings load correctly (model, permissions)
    - The statusline appears at the bottom of the session
-   - The `/sync-config` and `/api-agent` slash commands appear
+   - The `/sync-config` and `/deep-research-tiered` slash commands appear
    - The file-manager agent is available
 
 ### Installing by Hand
@@ -210,33 +210,32 @@ from upstream:
 git -C "$env:USERPROFILE\Desktop\claude-config" pull upstream main
 ```
 
-### Optional: Anthropic API Key
+### Optional: OpenRouter Key
 
-Only needed for API mode. Store it similarly to the above GitHub token:
+Only needed for OpenRouter mode. Store it similarly to the above GitHub token:
 
 ```powershell
-.\Set-Secret.ps1 -Name api-key
+.\Set-Secret.ps1 -Name openrouter-key
 ```
 
-### API Mode
+### OpenRouter Mode
 
-API mode runs Claude Code against pay-as-you-go API billing rather than your subscription or usage
-credits. **It is billed per token, separately from your subscription.** With the `api-key` secret
-stored:
+OpenRouter mode routes the whole session through OpenRouter's Anthropic-compatible endpoint
+(`ANTHROPIC_BASE_URL=https://openrouter.ai/api`), with gateway model discovery on, so `/model`
+lists the OpenRouter catalog. **Everything in such a session — Claude models included — bills
+your OpenRouter key, not your subscription.** With the `openrouter-key` secret stored:
 
-- `claude-api`, `claude-api-sp`, `claude-api-spsp` — shell functions, the API-billed
+- `claude-or`, `claude-or-sp`, `claude-or-spsp` — shell functions, the OpenRouter-billed
   counterparts of the launchers above
-- `claude-api.ps1 -Extended` — standalone launcher; `-Extended` requests the 1M context window,
-  and `-SP` / `-SPSP` add the system prompt and skipped permissions
-- `/api-agent` — from inside a subscription session, shells a single prompt out to an
-  API-billed process
 
-The model defaults to the alias `opus`, which always resolves to the current Opus, so it does not
-go stale when a new model ships. Pass `-Model` to pin a specific one.
+The endpoint is session-wide: the main model and every native subagent share it. One caveat:
+`claude-or` drops `ENABLE_TOOL_SEARCH` for its session, because deferred tool definitions are
+Anthropic-only and other models through the gateway reject them — so an OpenRouter session
+loads every MCP tool definition eagerly and pays that context cost up front.
 
 One note (noted at the top of `claude-functions.ps1` as well): `claude-sp` uses
 `--system-prompt-file`, which *replaces* Claude Code's default system prompt, while
-`claude-api-sp` uses `--append-system-prompt-file`, which *appends* to it.
+`claude-or-sp` uses `--append-system-prompt-file`, which *appends* to it.
 
 ## Verifying and Recovering
 

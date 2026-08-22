@@ -12,7 +12,7 @@
 #
 # Note on --system-prompt vs --append-system-prompt (deliberate, not drift):
 #   claude-sp      uses --system-prompt-file        -> REPLACES the default system prompt
-#   claude-api-sp  uses --append-system-prompt-file -> APPENDS to the default
+#   claude-or-sp   uses --append-system-prompt-file -> APPENDS to the default
 # Keep it that way unless you intend to change behaviour.
 
 # --- Where this repo lives ---------------------------------------------------
@@ -49,31 +49,54 @@ function claude-spsp {
     claude-sp --dangerously-skip-permissions --permission-mode dontAsk @args
 }
 
-# --- API-mode functions (pay-as-you-go billing, enables 1M context) ---
+# --- OpenRouter-mode functions (session routed through OpenRouter's Anthropic-
+# compatible endpoint; /model lists the OpenRouter catalog via gateway discovery) ---
+#
+# Replaced the API-mode functions (claude-api*) 2026-08-21: never used, and the slot
+# was wanted for OpenRouter. Everything in a claude-or session -- Claude models
+# included -- bills the OpenRouter key, not the Pro subscription.
 
 # Delegates to Get-Secret.ps1 rather than repeating its two lines, which is how the
 # github-token loader above already does it. Three separate copies of this decrypt
 # existed; a store none of them could read still reported as present everywhere.
-function Get-AnthropicApiKey {
-    return & (Get-ClaudeConfigPath "Get-Secret.ps1") -Name api-key
+function Get-OpenRouterKey {
+    return & (Get-ClaudeConfigPath "Get-Secret.ps1") -Name openrouter-key
 }
 
-function claude-api {
-    $env:ANTHROPIC_API_KEY = Get-AnthropicApiKey
-    try { claude @args }
-    finally { Remove-Item Env:\ANTHROPIC_API_KEY -ErrorAction SilentlyContinue }
-}
-
-function claude-api-sp {
-    $env:ANTHROPIC_API_KEY = Get-AnthropicApiKey
-    try {
-        claude --append-system-prompt-file (Get-ClaudeConfigPath "System Prompt.txt") @args
+function claude-or {
+    $key = Get-OpenRouterKey
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        Write-Error "No OpenRouter key. Create it with: Set-Secret.ps1 -Name openrouter-key"
+        return
     }
-    finally { Remove-Item Env:\ANTHROPIC_API_KEY -ErrorAction SilentlyContinue }
+    # A real ANTHROPIC_API_KEY would win precedence over the auth token, so drop any
+    # (OpenRouter's docs: the variable must not carry an Anthropic key). Not restored:
+    # default-mode shells don't set one.
+    Remove-Item Env:\ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
+    # Tool Search deferral is Anthropic-only: with ENABLE_TOOL_SEARCH inherited from the
+    # User env var, requests omit most tool definitions from tools[] for on-demand fetch,
+    # and a non-Anthropic model through the gateway 400s ("Deferred custom tools are only
+    # supported on Anthropic models..."). Drop it for the child, restore for this shell.
+    $ets = $env:ENABLE_TOOL_SEARCH
+    Remove-Item Env:\ENABLE_TOOL_SEARCH -ErrorAction SilentlyContinue
+    $env:ANTHROPIC_BASE_URL = 'https://openrouter.ai/api'
+    $env:ANTHROPIC_AUTH_TOKEN = $key
+    # v2.1.129+: populates the /model picker from the gateway's /v1/models.
+    $env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = '1'
+    try { claude @args }
+    finally {
+        if ($null -ne $ets) { $env:ENABLE_TOOL_SEARCH = $ets }
+        Remove-Item Env:\ANTHROPIC_BASE_URL, Env:\ANTHROPIC_AUTH_TOKEN,
+            Env:\CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY -ErrorAction SilentlyContinue
+    }
 }
 
-function claude-api-spsp {
-    claude-api-sp --dangerously-skip-permissions --permission-mode dontAsk @args
+function claude-or-sp {
+    claude-or --append-system-prompt-file (Get-ClaudeConfigPath "System Prompt.txt") @args
+}
+
+function claude-or-spsp {
+    claude-or-sp --dangerously-skip-permissions --permission-mode dontAsk @args
 }
 
 function codex-sp {
