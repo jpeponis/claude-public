@@ -1,0 +1,15 @@
+# personal.config.toml -- portable Codex CLI preferences, deployed to
+# ~/.codex/personal.config.toml and selected by codex-sp via `--profile personal`.
+#
+# SCOPE: profiles are CLI-flag-only (verified on Codex 0.149.0 -- a `profile` key in
+# config.toml is rejected as legacy), so this file affects codex-sp launches ONLY.
+# Direct `codex` launches, the IDE extension, and the desktop app read the base
+# config.toml, which stays machine-local and is never synced.
+#
+# This public copy is a template: add the stable choices that should follow you
+# between machines, and keep machine state (trust records, notices, auth) out.
+# Examples:
+#
+# model = "gpt-5.2"
+# model_reasoning_effort = "high"
+# personality = "pragmatic"
