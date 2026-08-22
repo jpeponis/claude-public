@@ -39,51 +39,329 @@ function Get-DesktopPath {
 # keeps printing green. So the list lives here, and adding a mapping teaches all
 # three scripts at once.
 #
-# Deliberately NOT in this plan, each for a reason worth keeping:
+# This is an ARTIFACT MANIFEST, not a pair list. The old model was flat repo<->local
+# pairs consumed bidirectionally, which cannot express one source deployed to two
+# destinations (a shared skill goes to BOTH ~/.claude/skills and ~/.agents/skills),
+# nor a generated file that must never be collected back. Each artifact declares:
+#
+#   Id            unique name, used in errors and by ExcludeMembersOf
+#   Repo          repo-relative source path (file, or directory root for Dirs)
+#   Destinations  one or more absolute local paths deploy writes to
+#   Authority     'installed'  -- the deployed tree is the truth; collect reads it
+#                 'repository' -- the repo is the truth; collect NEVER touches it
+#   CollectFrom   (installed only) exactly ONE destination collect reads from.
+#                 For a multi-destination artifact the others are projections:
+#                 deploy refreshes them, collect ignores them.
+#   GeneratedFrom / GeneratedExtra
+#                 (repository only) this file is BUILT from other repo files by
+#                 Build-DerivedInstructions -- see Update-GeneratedArtifacts.
+#   Filter/Recurse/Name   (Dirs only) same meaning as before.
+#   MembersFromRepo       (Dirs) collect only top-level entries that already exist
+#                 in the repo directory -- the repo decides membership. Used by
+#                 shared skills: which skills are shared is a repo decision, so a
+#                 new local-only skill lands in the claude-skills set, not here.
+#   ExcludeMembersOf      (Dirs) skip local top-level entries owned by the named
+#                 artifact. claude-skills excludes shared-skills' members so a
+#                 shared skill is not collected into global\skills a second time.
+#   Optional      (Dirs) doctor reports an empty repo set as OK, not a warning.
+#
+# Deliberately NOT in this manifest, each for a reason worth keeping:
 #   - The PowerShell profile. Collecting a whole profile drags in unrelated shell
 #     config and can only ever capture one of the two profile paths (5.1 vs 7+).
-#     The functions live in claude-functions.ps1; profiles get a managed block
-#     that dot-sources it (see Add-ClaudeProfileBlock).
+#     The functions live in claude-functions.ps1 / codex-functions.ps1; profiles
+#     get a managed block that dot-sources both (see Add-ClaudeProfileBlock).
 #   - ~/.claude/.*.enc secrets. DPAPI-bound to one user on one machine, so they
 #     cannot travel. secrets.json registers the names; each machine runs Set-Secret.ps1.
 #   - Repo-native scripts ("System Prompt.txt", lib\, and the launcher / doctor /
 #     restore / publish scripts). They are run FROM the repo, not deployed.
+#   - codex\AGENTS.extra.md and codex\project-desktop\AGENTS.extra.md: source
+#     fragments for the generated AGENTS.md files, edited in the repo.
+#   - ~/.codex machine state (auth.json, config.toml, databases, caches, trust
+#     records, default.rules). Machine-generated, never synced.
+#   - Codex rules: nothing portable exists yet. When one does, add a
+#     codex\rules\portable.rules artifact rather than syncing default.rules.
 #
 # Two memory files, at two scopes, on purpose. ~/.claude/CLAUDE.md holds the facts
 # that are true wherever a session is started; <Desktop>\CLAUDE.md holds only what is
-# true of the Desktop itself. They were one file for a long time, which worked because
-# sessions usually start on the Desktop -- and quietly meant every user-level fact was
-# unavailable the moment one did not.
-function Get-SyncPlan {
+# true of the Desktop itself. The Codex AGENTS.md files are DERIVED from them:
+# shared sections pass through, <!-- claude-only --> blocks are stripped, and the
+# AGENTS.extra.md fragment is appended. One source of shared facts, two outputs.
+function Get-ArtifactManifest {
     param(
         [Parameter(Mandatory)][string]$ClaudeHome,
+        [Parameter(Mandatory)][string]$CodexHome,
+        [Parameter(Mandatory)][string]$AgentsHome,
         [Parameter(Mandatory)][string]$DesktopDir
     )
     @{
-        # Repo path (relative to repo root) <-> absolute local path.
         Files = @(
-            @{ Repo = 'global\settings.json';                        Local = "$ClaudeHome\settings.json" }
-            @{ Repo = 'global\CLAUDE.md';                            Local = "$ClaudeHome\CLAUDE.md" }
-            @{ Repo = 'global\statusline-command.ps1';               Local = "$ClaudeHome\statusline-command.ps1" }
-            @{ Repo = 'powershell\claude-functions.ps1';             Local = "$ClaudeHome\claude-functions.ps1" }
-            @{ Repo = 'project-desktop\CLAUDE.md';                   Local = "$DesktopDir\CLAUDE.md" }
-            @{ Repo = 'project-desktop\.claude\settings.local.json'; Local = "$DesktopDir\.claude\settings.local.json" }
+            @{ Id = 'claude-settings';  Repo = 'global\settings.json';          Authority = 'installed'
+               Destinations = @("$ClaudeHome\settings.json");          CollectFrom = "$ClaudeHome\settings.json" }
+            @{ Id = 'claude-memory';    Repo = 'global\CLAUDE.md';              Authority = 'installed'
+               Destinations = @("$ClaudeHome\CLAUDE.md");              CollectFrom = "$ClaudeHome\CLAUDE.md" }
+            @{ Id = 'statusline';       Repo = 'global\statusline-command.ps1'; Authority = 'installed'
+               Destinations = @("$ClaudeHome\statusline-command.ps1"); CollectFrom = "$ClaudeHome\statusline-command.ps1" }
+            @{ Id = 'claude-functions'; Repo = 'powershell\claude-functions.ps1'; Authority = 'installed'
+               Destinations = @("$ClaudeHome\claude-functions.ps1");   CollectFrom = "$ClaudeHome\claude-functions.ps1" }
+            @{ Id = 'codex-functions';  Repo = 'powershell\codex-functions.ps1';  Authority = 'installed'
+               Destinations = @("$CodexHome\codex-functions.ps1");     CollectFrom = "$CodexHome\codex-functions.ps1" }
+            @{ Id = 'desktop-memory';   Repo = 'project-desktop\CLAUDE.md';     Authority = 'installed'
+               Destinations = @("$DesktopDir\CLAUDE.md");              CollectFrom = "$DesktopDir\CLAUDE.md" }
+            @{ Id = 'desktop-settings'; Repo = 'project-desktop\.claude\settings.local.json'; Authority = 'installed'
+               Destinations = @("$DesktopDir\.claude\settings.local.json"); CollectFrom = "$DesktopDir\.claude\settings.local.json" }
+            @{ Id = 'codex-profile';    Repo = 'codex\personal.config.toml';    Authority = 'installed'
+               Destinations = @("$CodexHome\personal.config.toml");    CollectFrom = "$CodexHome\personal.config.toml" }
+            @{ Id = 'codex-memory';     Repo = 'codex\AGENTS.md';               Authority = 'repository'
+               Destinations = @("$CodexHome\AGENTS.md")
+               GeneratedFrom = 'global\CLAUDE.md'; GeneratedExtra = 'codex\AGENTS.extra.md' }
+            @{ Id = 'codex-desktop-memory'; Repo = 'codex\project-desktop\AGENTS.md'; Authority = 'repository'
+               Destinations = @("$DesktopDir\AGENTS.md")
+               GeneratedFrom = 'project-desktop\CLAUDE.md'; GeneratedExtra = 'codex\project-desktop\AGENTS.extra.md' }
         )
         # Every file matching Filter is synced as a unit, in both directions:
         # deleting one locally removes it from the repo on the next collect, and
         # deleting it from the repo prunes it locally on the next deploy.
         #
-        # Recurse belongs to the skills entry because a skill is a DIRECTORY, not a
-        # file: ~/.claude/skills/<name>/SKILL.md plus whatever supporting files that
-        # skill bundles. Filter is '*' there for the same reason -- restricting it to
+        # Recurse belongs to the skill entries because a skill is a DIRECTORY, not a
+        # file: <skills>/<name>/SKILL.md plus whatever supporting files that skill
+        # bundles. Filter is '*' there for the same reason -- restricting it to
         # '*.md' would sync a skill's instructions while silently leaving behind the
         # scripts those instructions tell Claude to run.
         Dirs = @(
-            @{ Name = 'skills';    Repo = 'global\skills';   Local = "$ClaudeHome\skills";   Filter = '*';    Recurse = $true  }
-            @{ Name = 'agents';    Repo = 'global\agents';   Local = "$ClaudeHome\agents";   Filter = '*.md'; Recurse = $false }
-            @{ Name = 'workflows'; Repo = 'project-desktop\.claude\workflows'; Local = "$DesktopDir\.claude\workflows"; Filter = '*.js'; Recurse = $false }
+            @{ Id = 'shared-skills'; Name = 'shared skills'; Repo = 'shared\skills'; Authority = 'installed'
+               Destinations = @("$ClaudeHome\skills", "$AgentsHome\skills"); CollectFrom = "$ClaudeHome\skills"
+               Filter = '*'; Recurse = $true; MembersFromRepo = $true; Optional = $true }
+            @{ Id = 'claude-skills'; Name = 'claude skills'; Repo = 'global\skills'; Authority = 'installed'
+               Destinations = @("$ClaudeHome\skills"); CollectFrom = "$ClaudeHome\skills"
+               Filter = '*'; Recurse = $true; ExcludeMembersOf = 'shared-skills' }
+            @{ Id = 'codex-skills'; Name = 'codex-only skills'; Repo = 'codex\skills'; Authority = 'installed'
+               Destinations = @("$AgentsHome\skills"); CollectFrom = "$AgentsHome\skills"
+               Filter = '*'; Recurse = $true; ExcludeMembersOf = 'shared-skills'; Optional = $true }
+            @{ Id = 'claude-agents'; Name = 'claude agents'; Repo = 'global\agents'; Authority = 'installed'
+               Destinations = @("$ClaudeHome\agents"); CollectFrom = "$ClaudeHome\agents"
+               Filter = '*.md'; Recurse = $false }
+            @{ Id = 'codex-agents'; Name = 'codex agents'; Repo = 'codex\agents'; Authority = 'installed'
+               Destinations = @("$CodexHome\agents"); CollectFrom = "$CodexHome\agents"
+               Filter = '*.toml'; Recurse = $false; Optional = $true }
+            @{ Id = 'workflows'; Name = 'workflows'; Repo = 'project-desktop\.claude\workflows'; Authority = 'installed'
+               Destinations = @("$DesktopDir\.claude\workflows"); CollectFrom = "$DesktopDir\.claude\workflows"
+               Filter = '*.js'; Recurse = $false }
         )
     }
+}
+
+# Validate the manifest's internal consistency, throwing on the first defect. Runs at
+# the top of collect and deploy so a bad edit to the manifest is a refusal, not a
+# half-applied sync. With -RepoRoot it also checks that no two dir artifacts sharing
+# a destination claim the same top-level member -- the collision that would make
+# collection ambiguous.
+function Test-ArtifactManifest {
+    param(
+        [Parameter(Mandatory)]$Manifest,
+        [string]$RepoRoot
+    )
+    $all = @($Manifest.Files) + @($Manifest.Dirs)
+    $ids = @($all | ForEach-Object { $_.Id })
+    $dupes = @($ids | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+    if ($dupes) { throw "manifest: duplicate artifact id(s): $($dupes -join ', ')" }
+
+    foreach ($a in $all) {
+        if (-not $a.Id -or -not $a.Repo -or -not $a.Destinations -or -not $a.Authority) {
+            throw "manifest: artifact '$($a.Id)$($a.Repo)' is missing Id, Repo, Destinations or Authority"
+        }
+        if ($a.Authority -notin @('installed', 'repository')) {
+            throw "manifest: artifact $($a.Id) has unknown authority '$($a.Authority)'"
+        }
+        if ($a.Authority -eq 'installed') {
+            if (-not $a.CollectFrom) { throw "manifest: artifact $($a.Id) is installed-authoritative but has no CollectFrom" }
+            if ($a.CollectFrom -notin @($a.Destinations)) { throw "manifest: artifact $($a.Id): CollectFrom is not one of its Destinations" }
+        } elseif ($a.CollectFrom) {
+            throw "manifest: artifact $($a.Id) is repository-authoritative and must not set CollectFrom"
+        }
+        if ($a.ExcludeMembersOf -and ($a.ExcludeMembersOf -notin $ids)) {
+            throw "manifest: artifact $($a.Id): ExcludeMembersOf names unknown artifact '$($a.ExcludeMembersOf)'"
+        }
+    }
+
+    if ($RepoRoot) {
+        $dirs = @($Manifest.Dirs)
+        for ($i = 0; $i -lt $dirs.Count; $i++) {
+            for ($j = $i + 1; $j -lt $dirs.Count; $j++) {
+                $shared = @($dirs[$i].Destinations | Where-Object { $_ -in @($dirs[$j].Destinations) })
+                if ($shared.Count -eq 0) { continue }
+                $mi = @(Get-ArtifactMembers -RepoRoot $RepoRoot -Artifact $dirs[$i])
+                $mj = @(Get-ArtifactMembers -RepoRoot $RepoRoot -Artifact $dirs[$j])
+                $overlap = @($mi | Where-Object { $_ -in $mj })
+                if ($overlap) {
+                    throw "manifest: artifacts $($dirs[$i].Id) and $($dirs[$j].Id) share a destination and both own: $($overlap -join ', ')"
+                }
+            }
+        }
+    }
+}
+
+# Top-level entry names (skill directories, agent files) the repo side of a dir
+# artifact currently owns. Membership is a REPO decision: which skills are shared is
+# decided by where they sit in the repo tree, and this is the one place that reads it.
+function Get-ArtifactMembers {
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)]$Artifact
+    )
+    $root = Join-Path $RepoRoot $Artifact.Repo
+    if (-not (Test-Path $root)) { return @() }
+    return @(Get-ChildItem -LiteralPath $root | ForEach-Object { $_.Name })
+}
+
+# The local files a dir artifact's collect should consider, after membership rules.
+# $MemberIndex maps artifact Id -> its repo-side member names, computed ONCE before
+# any collection mutates the repo tree, so every artifact filters against the same
+# snapshot regardless of processing order.
+function Select-ArtifactLocalFiles {
+    param(
+        [Parameter(Mandatory)]$Artifact,
+        [Parameter(Mandatory)][hashtable]$MemberIndex
+    )
+    $files = @(Get-PlanFiles -Root $Artifact.CollectFrom -Filter $Artifact.Filter -Recurse $Artifact.Recurse)
+    if ($Artifact.MembersFromRepo) {
+        $members = @($MemberIndex[$Artifact.Id])
+        $files = @($files | Where-Object { ($_.RelPath -split '[\\/]')[0] -in $members })
+    }
+    if ($Artifact.ExcludeMembersOf) {
+        $excluded = @($MemberIndex[$Artifact.ExcludeMembersOf])
+        $files = @($files | Where-Object { ($_.RelPath -split '[\\/]')[0] -notin $excluded })
+    }
+    return @($files)
+}
+
+# Which installed-authoritative artifacts a set of repo-side changes could collide
+# with. Pure: takes the changed paths (forward-slash repo-relative, as git prints
+# them) and returns (Id, RepoPath, LocalPath) triples for collect to content-compare.
+# The comparison itself stays in collect.ps1 -- this function decides candidacy, so
+# candidacy is unit-testable without a git repo or a filesystem.
+function Get-DivergenceCandidates {
+    param(
+        [string[]]$ChangedRepoPaths,
+        [Parameter(Mandatory)]$Manifest
+    )
+    $candidates = @()
+    foreach ($a in @($Manifest.Files)) {
+        if ($a.Authority -ne 'installed') { continue }
+        $prefix = $a.Repo.Replace('\', '/')
+        foreach ($p in @($ChangedRepoPaths)) {
+            if ($p -eq $prefix) {
+                $candidates += [pscustomobject]@{ Id = $a.Id; RepoPath = $p; LocalPath = $a.CollectFrom }
+            }
+        }
+    }
+    foreach ($a in @($Manifest.Dirs)) {
+        if ($a.Authority -ne 'installed') { continue }
+        $prefix = $a.Repo.Replace('\', '/')
+        foreach ($p in @($ChangedRepoPaths)) {
+            if ($p -like "$prefix/*") {
+                $rel = $p.Substring($prefix.Length + 1)
+                # String concat, not Join-Path: PowerShell 5.1's Join-Path validates
+                # that the DRIVE exists, which makes this pure function untestable
+                # with synthetic paths and couples candidacy to the filesystem.
+                $candidates += [pscustomobject]@{
+                    Id        = $a.Id
+                    RepoPath  = $p
+                    LocalPath = ($a.CollectFrom.TrimEnd('\') + '\' + $rel.Replace('/', '\'))
+                }
+            }
+        }
+    }
+    return @($candidates)
+}
+
+# --- Derived instruction files (Codex AGENTS.md) ------------------------------
+# ~/.codex/AGENTS.md and <Desktop>\AGENTS.md are built, not authored: the matching
+# CLAUDE.md minus its <!-- claude-only --> ... <!-- /claude-only --> blocks, plus the
+# repo's AGENTS.extra.md fragment. One source of shared facts; editing the generated
+# file is always wrong, which is why it is repository-authoritative and carries a
+# header saying so.
+#
+# Unbalanced or nested markers THROW rather than best-effort: a missing close marker
+# would otherwise strip (or leak) half the file silently, and a generated
+# instructions file that is silently wrong is worse than a failed build.
+function Build-DerivedInstructions {
+    param(
+        [Parameter(Mandatory)][string]$SourceText,
+        [string]$ExtraText,
+        [Parameter(Mandatory)][string]$SourceLabel,
+        [string]$ExtraLabel
+    )
+    $open  = [regex]::Matches($SourceText, '<!--\s*claude-only\s*-->').Count
+    $close = [regex]::Matches($SourceText, '<!--\s*/claude-only\s*-->').Count
+    if ($open -ne $close) {
+        throw "$SourceLabel has $open opening claude-only marker(s) but $close closing marker(s); fix the markers before deriving"
+    }
+    $body = [regex]::Replace($SourceText, '(?s)<!--\s*claude-only\s*-->.*?<!--\s*/claude-only\s*-->[ \t]*\r?\n?', '')
+    # Leftover check matches MARKER SYNTAX, not the bare phrase: prose legitimately
+    # says "claude-only" when documenting the markers themselves.
+    if ($body -match '<!--\s*/?claude-only\s*-->') {
+        throw "$SourceLabel still contains a claude-only marker after stripping; markers are nested or malformed"
+    }
+    # LF throughout: .gitattributes checks every text file out with LF on every
+    # machine, and a CRLF-built output would compare "stale" against its own LF
+    # checkout on the next machine forever.
+    $body = [regex]::Replace($body, '(\r?\n){3,}', "`n`n")
+
+    $note = "<!-- GENERATED from $SourceLabel"
+    if ($ExtraLabel) { $note += " + $ExtraLabel" }
+    $note += " -- do not edit this file; edit the sources, then run collect.ps1 -->"
+
+    $out = $note + "`n" + $body.TrimEnd() + "`n"
+    if ($ExtraText -and $ExtraText.Trim()) {
+        $out += "`n" + $ExtraText.Trim() + "`n"
+    }
+    return $out.Replace("`r`n", "`n")
+}
+
+# Rebuild every generated artifact in the repo (or, with -Check, report which are
+# stale without writing). collect.ps1 rebuilds after collection so the outputs track
+# freshly collected sources; doctor.ps1 checks so a hand edit to a source that never
+# went through collect -- or to a generated file directly -- is named, not silent.
+function Update-GeneratedArtifacts {
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)]$Manifest,
+        [switch]$Check
+    )
+    $results = @()
+    foreach ($a in @($Manifest.Files | Where-Object { $_.GeneratedFrom })) {
+        $srcPath = Join-Path $RepoRoot $a.GeneratedFrom
+        if (-not (Test-Path $srcPath)) {
+            throw "generated artifact $($a.Id): source $($a.GeneratedFrom) is missing from the repo"
+        }
+        $extraText = ''
+        $extraLabel = $null
+        if ($a.GeneratedExtra) {
+            $extraPath = Join-Path $RepoRoot $a.GeneratedExtra
+            if (Test-Path $extraPath) {
+                $extraText  = Get-Content $extraPath -Raw -Encoding UTF8
+                $extraLabel = $a.GeneratedExtra
+            }
+        }
+        $built = Build-DerivedInstructions -SourceText (Get-Content $srcPath -Raw -Encoding UTF8) `
+                                           -ExtraText $extraText -SourceLabel $a.GeneratedFrom -ExtraLabel $extraLabel
+        $outPath = Join-Path $RepoRoot $a.Repo
+        $current = $null
+        # Line-ending-insensitive comparison, same reason publish.ps1 normalizes:
+        # autocrlf history means an older checkout can hold CRLF while the build is LF,
+        # and that difference is git's business, not staleness.
+        if (Test-Path $outPath) { $current = (Get-Content $outPath -Raw -Encoding UTF8).Replace("`r`n", "`n") }
+
+        if ($current -eq $built) {
+            $results += [pscustomobject]@{ Label = $a.Repo; State = 'current' }
+        } elseif ($Check) {
+            $results += [pscustomobject]@{ Label = $a.Repo; State = 'stale' }
+        } else {
+            Write-TextFile -Path $outPath -Content $built
+            $results += [pscustomobject]@{ Label = $a.Repo; State = 'rebuilt' }
+        }
+    }
+    return @($results)
 }
 
 # Enumerate one Dirs entry, in either direction, returning each file's path together
@@ -138,6 +416,33 @@ function Expand-Tokens {
     return $Text.Replace('{{CONFIG_ROOT}}', $ConfigRoot).
                  Replace('{{DESKTOP}}',     $Desktop).
                  Replace('{{USERNAME}}',    $UserName)
+}
+
+# The reverse direction: machine paths -> tokens, used by collect.ps1. Lives here
+# beside Expand-Tokens so the two directions are testable as a round trip -- the pair
+# disagreeing by a single slash makes every collected file look changed.
+#
+# Both slash spellings are collapsed because a deployed file may legitimately hold
+# either: deploy writes the forward-slashed form, but a human editing a deployed file
+# by hand types whatever their shell showed them. Tokenizing only one would leave the
+# other as a hardcoded local path -- the exact failure these tokens exist to prevent.
+# CONFIG_ROOT before DESKTOP, because the Desktop is a PREFIX of the config root;
+# the callers pass values in that order.
+function ConvertTo-RepoTokens {
+    param(
+        [string]$Text,
+        [Parameter(Mandatory)][string]$ConfigRoot,
+        [Parameter(Mandatory)][string]$Desktop
+    )
+    $replacements = @(
+        @{ Token = '{{CONFIG_ROOT}}'; Value = $ConfigRoot }
+        @{ Token = '{{DESKTOP}}';     Value = $Desktop }
+    )
+    foreach ($r in $replacements) {
+        $Text = $Text -replace [regex]::Escape($r.Value), $r.Token
+        $Text = $Text -replace [regex]::Escape($r.Value.Replace('/', '\')), $r.Token
+    }
+    return $Text
 }
 
 # What {{CONFIG_ROOT}} and {{DESKTOP}} expand to. One function each, because collect.ps1
@@ -255,6 +560,8 @@ function Get-ClaudeProfileBlock {
 $($m.Start)
 `$claudeFunctions = "`$env:USERPROFILE\.claude\claude-functions.ps1"
 if (Test-Path `$claudeFunctions) { . `$claudeFunctions }
+`$codexFunctions = "`$env:USERPROFILE\.codex\codex-functions.ps1"
+if (Test-Path `$codexFunctions) { . `$codexFunctions }
 $($m.End)
 "@
 }

@@ -21,10 +21,12 @@ $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $repoRoot "lib\Common.ps1")
 
 $claudeHome = Join-Path $env:USERPROFILE ".claude"
+$codexHome  = Join-Path $env:USERPROFILE ".codex"
+$agentsHome = Join-Path $env:USERPROFILE ".agents"
 $desktopDir = Get-DesktopPath
 $configRoot = Get-ConfigRoot -RepoRoot $repoRoot
 $desktopTok = Get-DesktopToken
-$plan       = Get-SyncPlan -ClaudeHome $claudeHome -DesktopDir $desktopDir
+$plan       = Get-ArtifactManifest -ClaudeHome $claudeHome -CodexHome $codexHome -AgentsHome $agentsHome -DesktopDir $desktopDir
 
 $script:fails = 0
 $script:warns = 0
@@ -95,47 +97,60 @@ if (-not (Test-Path $localSettings)) {
 }
 
 # --- Deployed content vs what the repo ships --------------------------------
-# The set of things that must be here comes from Get-SyncPlan, the same list
+# The set of things that must be here comes from Get-ArtifactManifest, the same list
 # deploy.ps1 acts on -- so a mapping added to the repo is checked here without
 # anyone remembering to update this file. A repo file that never arrived is a
-# failure; extra local files are the user's own and are fine.
+# failure; extra local files are the user's own (or another tool's -- Codex ships
+# system skills into its own trees) and are reported, never counted as drift.
+# Multi-destination artifacts are checked at EVERY destination: the projection
+# going missing is precisely the failure a single-destination check cannot see.
 Section "Deployed content"
 
 foreach ($set in $plan.Dirs) {
     $repoDir = Join-Path $repoRoot $set.Repo
-    $repoNames  = @(Get-PlanFiles -Root $repoDir   -Filter $set.Filter -Recurse $set.Recurse | ForEach-Object RelPath)
-    $localNames = @(Get-PlanFiles -Root $set.Local -Filter $set.Filter -Recurse $set.Recurse | ForEach-Object RelPath)
-
-    $missing = @($repoNames | Where-Object { $_ -notin $localNames })
-    $extra   = @($localNames | Where-Object { $_ -notin $repoNames })
-    $extraNote = if ($extra.Count) { " (+$($extra.Count) of your own)" } else { "" }
+    $repoNames = @(Get-PlanFiles -Root $repoDir -Filter $set.Filter -Recurse $set.Recurse | ForEach-Object RelPath)
 
     if ($repoNames.Count -eq 0) {
-        Check WARN "$($set.Name): repo ships none"
-    } elseif ($missing.Count -eq 0) {
-        Check OK "$($set.Name): $($repoNames.Count)/$($repoNames.Count) from repo deployed$extraNote"
-    } else {
-        Check FAIL "$($set.Name): $($missing.Count) missing -- $($missing -join ', ')" "run deploy.ps1"
+        if ($set.Optional) { Check OK "$($set.Name): repo ships none (optional set)" }
+        else { Check WARN "$($set.Name): repo ships none" }
+        continue
+    }
+
+    foreach ($destRoot in @($set.Destinations)) {
+        $localNames = @(Get-PlanFiles -Root $destRoot -Filter $set.Filter -Recurse $set.Recurse | ForEach-Object RelPath)
+        $missing = @($repoNames | Where-Object { $_ -notin $localNames })
+        $extra   = @($localNames | Where-Object { $_ -notin $repoNames })
+        $extraNote = if ($extra.Count) { " (+$($extra.Count) unmanaged, left alone)" } else { "" }
+
+        if ($missing.Count -eq 0) {
+            Check OK "$($set.Name) -> $destRoot`: $($repoNames.Count)/$($repoNames.Count) deployed$extraNote"
+        } else {
+            Check FAIL "$($set.Name) -> $destRoot`: $($missing.Count) missing -- $($missing -join ', ')" "run deploy.ps1"
+        }
     }
 }
 
 # --- Does the deployed copy still MATCH the repo? ---------------------------
-# Presence was never the whole question. Editing ~/.claude/commands/foo.md directly
-# is the normal way to work on a skill, and nothing announces that the repo now
+# Presence was never the whole question. Editing a deployed file directly is the
+# normal way to work on a skill, and nothing announces that the repo now
 # disagrees -- until the next deploy silently overwrites the edit (recoverably, into
 # .backups\, but only if you know to look). Neither answer is "wrong", so this warns
 # and names both directions rather than failing.
 $drifted = @()
 $deployedPairs = @()
 foreach ($map in $plan.Files) {
-    $deployedPairs += @{ Repo = (Join-Path $repoRoot $map.Repo); Local = $map.Local; Label = $map.Repo }
+    foreach ($dest in @($map.Destinations)) {
+        $deployedPairs += @{ Repo = (Join-Path $repoRoot $map.Repo); Local = $dest; Label = "$($map.Repo) -> $dest" }
+    }
 }
 foreach ($set in $plan.Dirs) {
     foreach ($f in (Get-PlanFiles -Root (Join-Path $repoRoot $set.Repo) -Filter $set.Filter -Recurse $set.Recurse)) {
-        $deployedPairs += @{
-            Repo  = $f.FullName
-            Local = (Join-Path $set.Local $f.RelPath)
-            Label = (Join-Path $set.Repo $f.RelPath)
+        foreach ($destRoot in @($set.Destinations)) {
+            $deployedPairs += @{
+                Repo  = $f.FullName
+                Local = (Join-Path $destRoot $f.RelPath)
+                Label = (Join-Path $set.Repo $f.RelPath)
+            }
         }
     }
 }
@@ -301,14 +316,16 @@ if ($nonAscii.Count -eq 0) {
 # survived every mechanical check this script already had.
 Section "Synced content"
 
-$skillSet = @($plan.Dirs | Where-Object { $_.Name -eq 'skills' })[0]
+$skillSets = @($plan.Dirs | Where-Object { $_.Repo -like '*skills' })
 
-if (-not $skillSet) {
-    Check WARN "no skills set in the sync plan"
+if ($skillSets.Count -eq 0) {
+    Check WARN "no skill sets in the artifact manifest"
 } else {
-    $skillRoot = Join-Path $repoRoot $skillSet.Repo
     $skillDirs = @()
-    if (Test-Path $skillRoot) { $skillDirs = @(Get-ChildItem $skillRoot -Directory) }
+    foreach ($set in $skillSets) {
+        $skillRoot = Join-Path $repoRoot $set.Repo
+        if (Test-Path $skillRoot) { $skillDirs += @(Get-ChildItem $skillRoot -Directory) }
+    }
 
     # A skill's `description` is how Claude decides whether to reach for it. When it is
     # absent the listing falls back to the first paragraph of markdown, so a skill whose
@@ -396,6 +413,159 @@ if (-not (Test-Path $promptPath) -or -not (Test-Path $workerPath)) {
         if ($sample.Length -gt 60) { $sample = $sample.Substring(0, 60) + '...' }
         Check FAIL "research-worker's prompt has drifted from System Prompt.txt in $($orphans.Count) line(s) -- first: `"$sample`"" "reconcile the two; they are the same prompt by design"
     }
+}
+
+# --- Codex target ------------------------------------------------------------
+# The Codex half of the manifest. Scope note: the personal profile is CLI-flag-only
+# (verified on 0.149.0 -- a `profile` key in config.toml is rejected as legacy), so
+# everything here certifies the codex-sp path, not Codex-at-large.
+Section "Codex target"
+
+$codexVerLine = Get-ExeVersion 'codex'
+if (-not $codexVerLine) {
+    Check WARN "codex not found on PATH -- Codex target not checked" "npm install -g @openai/codex"
+} else {
+    # Version gate. compat.json records the newest version these checks were CERTIFIED
+    # against; the surfaces this repo leans on (file profiles, model_instructions_file,
+    # agent TOML) are version-sensitive, and the schema has already been caught
+    # documenting a key the binary rejects -- so an uncertified newer version is a
+    # warning until the canary checks pass and 'certified' is raised.
+    $codexVer = $null
+    if ($codexVerLine -match '(\d+)\.(\d+)\.(\d+)') { $codexVer = [version]$Matches[0] }
+    $compatPath = Join-Path $repoRoot 'compat.json'
+    if (-not $codexVer) {
+        Check WARN "cannot parse codex version from '$codexVerLine'"
+    } elseif (-not (Test-Path $compatPath)) {
+        Check WARN "compat.json missing -- no version gate" "restore compat.json in the repo"
+    } else {
+        try {
+            $compat = (Get-Content $compatPath -Raw -Encoding UTF8 | ConvertFrom-Json).codex
+            $min = [version]$compat.min
+            $cert = [version]$compat.certified
+            if ($codexVer -lt $min) {
+                Check FAIL "codex $codexVer is below the minimum supported $min" "codex update"
+            } elseif ($codexVer -gt $cert) {
+                Check WARN "codex $codexVer is newer than the certified $cert" "re-run the canary checks, then raise 'certified' in compat.json"
+            } else {
+                Check OK "codex $codexVer (min $min, certified $cert)"
+            }
+        } catch {
+            Check FAIL "compat.json is not valid JSON -- $($_.Exception.Message)"
+        }
+    }
+
+    # The launcher and its repo pointer.
+    $codexFn = Join-Path $codexHome 'codex-functions.ps1'
+    if (Test-Path $codexFn) { Check OK "codex-functions.ps1 deployed to ~/.codex/" }
+    else { Check FAIL "missing $codexFn" "run deploy.ps1" }
+
+    foreach ($targetHome in @($claudeHome, $codexHome)) {
+        $ptr = Join-Path $targetHome '.config-root'
+        if (-not (Test-Path $ptr)) {
+            Check WARN "missing repo pointer $ptr (functions fall back to <Desktop>\claude-config)" "run deploy.ps1"
+        } elseif (((Get-Content $ptr -Raw).Trim()) -ne $repoRoot) {
+            Check WARN "repo pointer $ptr points at '$((Get-Content $ptr -Raw).Trim())', not this repo" "run deploy.ps1 from the repo the functions should use"
+        } else {
+            Check OK "repo pointer $ptr -> this repo"
+        }
+    }
+
+    # Profile probe: `codex -p personal debug prompt-input` is the one local, sanctioned
+    # command that loads a profile without a model call. It catches a missing codex
+    # install and a syntactically broken profile TOML (verified: malformed TOML exits 1).
+    # KNOWN LIMIT on 0.149.0: prompt-input renders the input list, not the base
+    # instructions, so it can NOT verify that model_instructions_file replacement took
+    # effect -- that is certified behaviorally on the canary machine per version.
+    if (Test-Path (Join-Path $codexHome 'personal.config.toml')) {
+        $probeOut = $null
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { $probeOut = & codex -p personal debug prompt-input 2>&1 | Out-String } catch { }
+        finally { $ErrorActionPreference = $previousEap }
+        if ($LASTEXITCODE -eq 0) {
+            Check OK "personal profile loads (codex -p personal debug prompt-input)"
+            # Coexistence: the deployed global AGENTS.md must still reach the model's
+            # input while the profile is active. Its 'GENERATED from' header line is
+            # stable across content edits, so grep for that. This is the per-upgrade
+            # re-verification the version gate exists for: the config reference calls
+            # model_instructions_file a replacement "instead of AGENTS.md", and the
+            # coexistence observed today is a behavior of this version, not a contract.
+            if (Test-Path (Join-Path $codexHome 'AGENTS.md')) {
+                if ($probeOut -match 'GENERATED from') {
+                    Check OK "deployed AGENTS.md reaches the prompt input under the personal profile"
+                } else {
+                    Check FAIL "deployed ~/.codex/AGENTS.md does NOT appear in the prompt input" "a Codex update may have changed AGENTS.md discovery; re-certify before raising compat.json"
+                }
+            }
+        } else {
+            $firstLine = @($probeOut -split "`r?`n" | Where-Object { $_ })[0]
+            Check FAIL "personal profile probe failed -- $firstLine" "fix ~/.codex/personal.config.toml, or re-run deploy.ps1"
+        }
+    } else {
+        Check FAIL "missing ~/.codex/personal.config.toml" "run deploy.ps1"
+    }
+
+    # Codex agent TOMLs: the three required keys, checked textually. A parse-level
+    # check lives in the probe above only for the profile; agents are read lazily by
+    # Codex, so a missing key would otherwise surface mid-session.
+    foreach ($t in @(Get-ChildItem (Join-Path $repoRoot 'codex\agents') -Filter '*.toml' -File -ErrorAction SilentlyContinue)) {
+        $tomlText = Get-Content $t.FullName -Raw -Encoding UTF8
+        $missingKeys = @()
+        foreach ($k in @('name', 'description', 'developer_instructions')) {
+            if ($tomlText -notmatch "(?m)^\s*$k\s*=") { $missingKeys += $k }
+        }
+        if ($missingKeys.Count -eq 0) { Check OK "codex agent $($t.Name) declares name/description/developer_instructions" }
+        else { Check FAIL "codex agent $($t.Name) is missing: $($missingKeys -join ', ')" "Codex agent TOML requires all three fields" }
+    }
+}
+
+# Generated artifacts: repo-side checks, meaningful even without codex installed.
+$staleGen = @()
+try {
+    $staleGen = @(Update-GeneratedArtifacts -RepoRoot $repoRoot -Manifest $plan -Check | Where-Object { $_.State -eq 'stale' })
+    if ($staleGen.Count -eq 0) {
+        Check OK "generated AGENTS.md files match their sources"
+    } else {
+        Check FAIL "stale generated file(s): $(@($staleGen | ForEach-Object Label) -join ', ')" "run collect.ps1 (rebuilds them), then deploy.ps1"
+    }
+} catch {
+    Check FAIL "generated-artifact build failed -- $($_.Exception.Message)"
+}
+
+# Lint the generated Codex files for Claude-only vocabulary that leaked past the
+# markers. A wrong instruction in AGENTS.md actively misleads Codex, which is worse
+# than a missing one -- but unmarked shared prose can legitimately mention Claude by
+# name, so this warns and names lines rather than failing.
+# 'claude-sp(sp)?\b', not 'claude-sp': the bare form is a substring of the innocent
+# word 'Claude-specific'. Same for claude-or vs 'claude-orchestrated' etc.
+$lintPattern = '(?i)claude-in-chrome|claude-or(-sp)?(sp)?\b|claude-sp(sp)?\b|ANTHROPIC_|OpenRouter|Tool Search|file-manager agent'
+foreach ($g in @($plan.Files | Where-Object { $_.GeneratedFrom })) {
+    $gp = Join-Path $repoRoot $g.Repo
+    if (-not (Test-Path $gp)) { continue }
+    $hits = @()
+    $n = 0
+    foreach ($line in [System.IO.File]::ReadAllLines($gp)) {
+        $n++
+        if ($line -match $lintPattern) { $hits += $n }
+    }
+    if ($hits.Count -eq 0) { Check OK "$($g.Repo) carries no Claude-only vocabulary" }
+    else { Check WARN "$($g.Repo) mentions Claude-only tooling on line(s) $($hits -join ', ')" "wrap the source section in claude-only markers if it should not reach Codex" }
+}
+
+# Machine state must never be tracked. The manifest deliberately excludes ~/.codex
+# runtime files; this catches one being added by hand.
+$previousEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$trackedCodex = @()
+try { $trackedCodex = @(& git -C $repoRoot ls-files 'codex/' 2>$null | Where-Object { $_ }) } catch { }
+finally { $ErrorActionPreference = $previousEap }
+$badTracked = @($trackedCodex | Where-Object {
+    $_ -match '(?i)(^|/)(auth\.json|config\.toml|history\.jsonl|cap_sid|installation_id)$' -or $_ -match '(?i)\.(sqlite|sqlite-shm|sqlite-wal)$' -or $_ -match '(?i)(^|/)(cache|log|memories|sessions)/'
+})
+if ($badTracked.Count -gt 0) {
+    Check FAIL "codex machine state is tracked in the repo: $($badTracked -join ', ')" "git rm --cached it; machine state never syncs"
+} else {
+    Check OK "no codex machine state tracked in the repo"
 }
 
 # --- Summary ----------------------------------------------------------------

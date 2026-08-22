@@ -76,9 +76,16 @@ function Invoke-Push {
         exit 1
     }
 
-    # Collect local config into repo
+    # Collect local config into repo. A non-zero exit is the divergence guard
+    # refusing (or a real failure): stop HERE, or the push would roll on to a
+    # "Nothing to commit" that buries the refusal under a green message.
     Write-Host ""
     & (Join-Path $repoRoot "collect.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "Push aborted: collect refused or failed (see above)." -ForegroundColor Red
+        exit $LASTEXITCODE
+    }
 
     # Stage everything
     Write-Host ""
@@ -89,6 +96,31 @@ function Invoke-Push {
     if (-not $status) {
         Write-Host ""
         Write-Host "Nothing to commit. Local config matches repo." -ForegroundColor Green
+        # 'Nothing to commit' is not 'nothing to push': commits made by hand in the
+        # repo (repo-authoritative artifacts, script changes) sit local until pushed,
+        # and exiting here used to leave them behind while reporting green.
+        # Same stderr-redirect trap as the dry-run reset below: under
+        # $ErrorActionPreference = 'Stop', '2>$null' turns any git stderr line into a
+        # terminating error. Relax the preference for exactly this call.
+        $unpushed = @()
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { $unpushed = @(git -C $repoRoot log --oneline 'origin/main..HEAD' 2>$null | Where-Object { $_ }) }
+        catch { }
+        finally { $ErrorActionPreference = $previousEap }
+        if ($unpushed.Count -gt 0) {
+            Write-Host "Pushing $($unpushed.Count) existing local commit(s)..." -ForegroundColor White
+            if ($DryRun) {
+                $unpushed | ForEach-Object { Write-Host "  would push: $_" -ForegroundColor Yellow }
+                exit 0
+            }
+            git -C $repoRoot push origin main
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "ERROR: git push failed." -ForegroundColor Red
+                exit 1
+            }
+            Write-Host "Pushed successfully." -ForegroundColor Green
+        }
         exit 0
     }
 

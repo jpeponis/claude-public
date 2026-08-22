@@ -16,21 +16,28 @@
 # Keep it that way unless you intend to change behaviour.
 
 # --- Where this repo lives ---------------------------------------------------
-# GetFolderPath('Desktop'), not "$env:USERPROFILE\Desktop": OneDrive Known Folder
-# Move redirects Desktop on a default Windows 11 consumer setup, so the literal path
-# is either missing or a stale leftover -- and claude-sp would go looking for the
-# system prompt in a directory that does not exist.
+# Resolved through the machine-local '.config-root' pointer deploy.ps1 writes beside
+# this file, so an install anywhere still works. Fallback: <Desktop>\claude-config,
+# the bootstrap location -- via GetFolderPath('Desktop'), not "$env:USERPROFILE\Desktop",
+# because OneDrive Known Folder Move redirects Desktop on a default Windows 11 setup
+# and the literal path is then missing or a stale leftover.
 #
 # Every function below routes through this one, so the repo's location is decided in
-# exactly one place. codex-sp used to resolve Desktop itself, which is how the two
-# could have disagreed.
-#
-# This assumes the repo sits at <Desktop>\claude-config, which is where bootstrap.ps1
-# and the README put it. Installing anywhere else (bootstrap.ps1 -Dest) would need
-# deploy.ps1 to template the path in, the way it already does for {{USERNAME}}.
+# exactly one place. (codex-sp lives in codex-functions.ps1 under ~/.codex now, with
+# its own pointer, so the Codex target no longer depends on this file existing.)
+$script:ClaudeFnDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:ClaudeConfigRoot = $null
+$claudePointer = Join-Path $script:ClaudeFnDir '.config-root'
+if (Test-Path $claudePointer) {
+    $script:ClaudeConfigRoot = (Get-Content $claudePointer -Raw).Trim()
+}
+if (-not $script:ClaudeConfigRoot -or -not (Test-Path $script:ClaudeConfigRoot)) {
+    $script:ClaudeConfigRoot = Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config'
+}
+
 function Get-ClaudeConfigPath {
     param([string]$Leaf)
-    return (Join-Path (Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config') $Leaf)
+    return (Join-Path $script:ClaudeConfigRoot $Leaf)
 }
 
 # --- Encrypted secret store: load GitHub token for the GitHub MCP plugin ---
@@ -99,71 +106,8 @@ function claude-or-spsp {
     claude-or-sp --dangerously-skip-permissions --permission-mode dontAsk @args
 }
 
-function codex-sp {
-    $codexArgs = @($args)
-
-    $promptPath = Get-ClaudeConfigPath "System Prompt.txt"
-
-    if (-not (Test-Path -LiteralPath $promptPath -PathType Leaf)) {
-        Write-Error "Prompt file not found: $promptPath"
-        return
-    }
-
-    $promptContents = Get-Content -LiteralPath $promptPath -Raw
-
-    if ([string]::IsNullOrWhiteSpace($promptContents)) {
-        Write-Error "Prompt file is empty: $promptPath"
-        return
-    }
-
-    # Encode the Windows path as a TOML string for Codex's --config flag.
-    $tomlPath = $promptPath.Replace('\', '\\').Replace('"', '\"')
-    $configOverride = 'model_instructions_file="' + $tomlPath + '"'
-
-    # Codex 0.144 rejects root --strict-config for administrative/debug
-    # subcommands. Apply it to interactive, agent, and session commands.
-    $rootOptionsWithValue = @(
-        '-c', '--config', '--enable', '--disable', '--remote',
-        '--remote-auth-token-env', '-i', '--image', '-m', '--model',
-        '--local-provider', '-p', '--profile', '-s', '--sandbox', '-C',
-        '--cd', '--add-dir', '-a', '--ask-for-approval'
-    )
-    $knownSubcommands = @(
-        'exec', 'e', 'review', 'login', 'logout', 'mcp', 'plugin', 'mcp-server',
-        'app-server', 'remote-control', 'app', 'completion', 'update',
-        'doctor', 'sandbox', 'debug', 'apply', 'a', 'resume', 'archive',
-        'delete', 'unarchive', 'fork', 'cloud', 'cloud-tasks', 'exec-server',
-        'features', 'help'
-    )
-    $strictConfigSubcommands = @(
-        'exec', 'e', 'review', 'mcp-server', 'exec-server', 'resume', 'archive',
-        'delete', 'unarchive', 'fork', 'doctor'
-    )
-
-    $selectedSubcommand = $null
-    for ($i = 0; $i -lt $codexArgs.Count; $i++) {
-        $argument = [string]$codexArgs[$i]
-        if ($argument -eq '--') {
-            break
-        }
-        if ($rootOptionsWithValue -contains $argument) {
-            $i++
-            continue
-        }
-        if ($argument.StartsWith('-')) {
-            continue
-        }
-        if ($knownSubcommands -contains $argument) {
-            $selectedSubcommand = $argument
-        }
-        break
-    }
-
-    $codexLaunchArgs = @('--config', $configOverride)
-    if ($null -eq $selectedSubcommand -or $strictConfigSubcommands -contains $selectedSubcommand) {
-        $codexLaunchArgs = @('--strict-config') + $codexLaunchArgs
-    }
-    $codexLaunchArgs += $codexArgs
-
-    & codex @codexLaunchArgs
-}
+# codex-sp moved to codex-functions.ps1, deployed to ~/.codex/codex-functions.ps1 and
+# sourced by the same managed profile block. The Codex launcher living in the Claude
+# target's file meant Codex could not exist without Claude installed -- and its
+# hand-written subcommand grammar went stale within one Codex release. Both problems
+# leave with it.
