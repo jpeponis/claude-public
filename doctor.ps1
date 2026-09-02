@@ -425,29 +425,26 @@ $codexVerLine = Get-ExeVersion 'codex'
 if (-not $codexVerLine) {
     Check WARN "codex not found on PATH -- Codex target not checked" "npm install -g @openai/codex"
 } else {
-    # Version gate. compat.json records the newest version these checks were CERTIFIED
-    # against; the surfaces this repo leans on (file profiles, model_instructions_file,
-    # agent TOML) are version-sensitive, and the schema has already been caught
-    # documenting a key the binary rejects -- so an uncertified newer version is a
-    # warning until the canary checks pass and 'certified' is raised.
+    # Version floor. compat.json records the oldest Codex these checks hold on: the
+    # surfaces this repo leans on (file profiles, model_instructions_file, agent TOML)
+    # are version-sensitive, and the schema has already been caught documenting a key
+    # the binary rejects. There is deliberately no ceiling -- Codex ships every few
+    # days, so a "newest certified" pin was stale within the week and its warning was
+    # permanently on. The per-version verification is the probes below, run every time.
     $codexVer = $null
     if ($codexVerLine -match '(\d+)\.(\d+)\.(\d+)') { $codexVer = [version]$Matches[0] }
     $compatPath = Join-Path $repoRoot 'compat.json'
     if (-not $codexVer) {
         Check WARN "cannot parse codex version from '$codexVerLine'"
     } elseif (-not (Test-Path $compatPath)) {
-        Check WARN "compat.json missing -- no version gate" "restore compat.json in the repo"
+        Check WARN "compat.json missing -- no version floor" "restore compat.json in the repo"
     } else {
         try {
-            $compat = (Get-Content $compatPath -Raw -Encoding UTF8 | ConvertFrom-Json).codex
-            $min = [version]$compat.min
-            $cert = [version]$compat.certified
+            $min = [version](Get-Content $compatPath -Raw -Encoding UTF8 | ConvertFrom-Json).codex.min
             if ($codexVer -lt $min) {
                 Check FAIL "codex $codexVer is below the minimum supported $min" "codex update"
-            } elseif ($codexVer -gt $cert) {
-                Check WARN "codex $codexVer is newer than the certified $cert" "re-run the canary checks, then raise 'certified' in compat.json"
             } else {
-                Check OK "codex $codexVer (min $min, certified $cert)"
+                Check OK "codex $codexVer (min $min)"
             }
         } catch {
             Check FAIL "compat.json is not valid JSON -- $($_.Exception.Message)"
@@ -475,7 +472,7 @@ if (-not $codexVerLine) {
     # install and a syntactically broken profile TOML (verified: malformed TOML exits 1).
     # KNOWN LIMIT on 0.149.0: prompt-input renders the input list, not the base
     # instructions, so it can NOT verify that model_instructions_file replacement took
-    # effect -- that is certified behaviorally on the canary machine per version.
+    # effect -- a broken replacement shows up in the first codex-sp session instead.
     if (Test-Path (Join-Path $codexHome 'personal.config.toml')) {
         $probeOut = $null
         $previousEap = $ErrorActionPreference
@@ -487,14 +484,14 @@ if (-not $codexVerLine) {
             # Coexistence: the deployed global AGENTS.md must still reach the model's
             # input while the profile is active. Its 'GENERATED from' header line is
             # stable across content edits, so grep for that. This is the per-upgrade
-            # re-verification the version gate exists for: the config reference calls
-            # model_instructions_file a replacement "instead of AGENTS.md", and the
-            # coexistence observed today is a behavior of this version, not a contract.
+            # re-verification: the config reference calls model_instructions_file a
+            # replacement "instead of AGENTS.md", and the coexistence observed today is
+            # a behavior of this version, not a contract.
             if (Test-Path (Join-Path $codexHome 'AGENTS.md')) {
                 if ($probeOut -match 'GENERATED from') {
                     Check OK "deployed AGENTS.md reaches the prompt input under the personal profile"
                 } else {
-                    Check FAIL "deployed ~/.codex/AGENTS.md does NOT appear in the prompt input" "a Codex update may have changed AGENTS.md discovery; re-certify before raising compat.json"
+                    Check FAIL "deployed ~/.codex/AGENTS.md does NOT appear in the prompt input" "a Codex update may have changed AGENTS.md discovery; rework the codex-sp launcher, or pin codex to the last version that passed"
                 }
             }
         } else {
