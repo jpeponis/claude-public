@@ -1,7 +1,6 @@
 {
-  "_comment": "Version-compatibility gate for version-sensitive surfaces (file profiles, model_instructions_file replacement, agent TOML). doctor.ps1 FAILS below min and WARNS above certified until the canary checks pass on the new version; then raise certified here and push.",
+  "_comment": "Version floor for the version-sensitive Codex surfaces this repo leans on (file profiles, model_instructions_file replacement, agent TOML). doctor.ps1 FAILS below min. There is deliberately no ceiling: Codex ships every few days, and doctor's Codex probes are the per-version verification, run on every invocation.",
   "codex": {
-    "min": "0.149.0",
-    "certified": "0.149.0"
+    "min": "0.149.0"
   }
 }

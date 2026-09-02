@@ -61,8 +61,8 @@ Two scope notes up front:
 - `sync-config.ps1` — `push` / `pull` wrapper around the two above
 - `doctor.ps1` — Report what actually works on this machine; exits non-zero if anything failed
 - `restore.ps1` — Restore from the timestamped backups `deploy.ps1` writes to `.backups\`
-- `compat.json` — The minimum and newest-*certified* Codex versions; `doctor.ps1` fails below
-  min and warns above certified
+- `compat.json` — The oldest Codex version the Codex checks hold on; `doctor.ps1` fails below
+  it. There is no ceiling (see *Version floor* under the Codex target)
 - `tests/run-tests.ps1` — Unit tests for the sync engine's branching logic. Deliberately
   dependency-free (plain asserts): a suite that needs installing before it runs is a suite
   that does not run
@@ -145,14 +145,16 @@ Know what you are opting into:
   Desktop or a non-repository child — sessions inside a git repo start discovery at that
   repo's root and never look above it. Repo-specific Codex instructions belong in each repo's
   own root `AGENTS.md`.
-- **Version gate.** The surfaces this leans on (file profiles, prompt replacement, agent TOML)
+- **Version floor.** The surfaces this leans on (file profiles, prompt replacement, agent TOML)
   are version-sensitive, and the published schema has already been caught documenting a key
-  the binary rejects. `compat.json` records the minimum and newest-certified versions;
-  `doctor.ps1` fails below min and warns above certified until you re-run its Codex checks on
-  the new version and raise `certified`. Doctor's probe (`codex -p personal debug
-  prompt-input`) validates the profile and verifies the deployed `AGENTS.md` still reaches the
-  model's input under the profile — the coexistence you are relying on is a behavior of the
-  installed version, not a documented contract, so it is re-checked rather than assumed.
+  the binary rejects. `compat.json` records the minimum version; `doctor.ps1` fails below it.
+  There is deliberately no "newest certified" ceiling: Codex ships every few days, so a pin
+  is stale within the week and its warning is permanently on — and a warning that is always
+  on is one nobody reads. The per-version verification is doctor's probe (`codex -p personal
+  debug prompt-input`), which runs every time: it validates the profile and verifies the
+  deployed `AGENTS.md` still reaches the model's input under the profile — the coexistence
+  you are relying on is a behavior of the installed version, not a documented contract, so
+  it is re-checked rather than assumed.
 
 Codex machine state — `auth.json`, the base `config.toml`, databases, trust records — never
 syncs, and doctor fails if any of it is ever tracked.
@@ -373,7 +375,7 @@ One note (noted at the top of `claude-functions.ps1` as well): `claude-sp` uses
 ```
 
 `doctor.ps1` reports what is actually true on this machine: Claude Code, Node and Codex
-versions (the last against `compat.json`), settings that parse, every artifact the repo ships
+versions (the last against the `compat.json` floor), settings that parse, every artifact the repo ships
 present at *every* destination, every deployed file still *matching* the repo, the statusline
 actually executing, both PowerShell profiles wired, the repo pointers pointing home, the
 Codex profile loading, the generated files fresh and free of Claude-only vocabulary, no Codex
