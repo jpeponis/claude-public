@@ -565,6 +565,34 @@ if ($badTracked.Count -gt 0) {
     Check OK "no codex machine state tracked in the repo"
 }
 
+# --- Public mirror -----------------------------------------------------------
+# publish.ps1 is private-only (its manifest names the systems that must never be
+# published), so this section exists in the private repo alone and a public fork skips
+# it. Shelling out keeps every private name out of this shared file; a child process
+# gives a clean exit code, and the summary line carries the count. The public repo used
+# to fall behind by whole refactors because nothing looked unless someone remembered to.
+$publishScript = Join-Path $repoRoot 'publish.ps1'
+if (Test-Path $publishScript) {
+    Section "Public mirror"
+    $pubOut = ''
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $pubOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $publishScript 2>&1 | Out-String } catch { }
+    finally { $ErrorActionPreference = $previousEap }
+    $publishCmd = "powershell -ExecutionPolicy Bypass -File `"$publishScript`""
+    if ($LASTEXITCODE -eq 0) {
+        Check OK "public repo is in sync with this one"
+    } elseif ($pubOut -match 'No git repository at (.+)') {
+        Check OK "public clone not present on this machine ($($Matches[1].Trim())) -- publish check skipped"
+    } elseif ($pubOut -cmatch '\[X\] (sensitive term at|PRIVATE-ONLY FILE)') {   # -cmatch: the sweep's section title is 'Sensitive terms'
+        Check FAIL "the public tree contains private content" "run $publishCmd and fix every [X] before anything is pushed"
+    } elseif ($pubOut -match '=== (\d+) problem\(s\)') {
+        Check WARN "public repo has fallen behind: $($Matches[1]) problem(s)" "run $publishCmd for the list, then -Apply, review and commit in the public clone"
+    } else {
+        Check WARN "publish check did not complete" "run $publishCmd"
+    }
+}
+
 # --- Summary ----------------------------------------------------------------
 Write-Host ""
 $summary = "$script:fails failure(s), $script:warns warning(s)"
