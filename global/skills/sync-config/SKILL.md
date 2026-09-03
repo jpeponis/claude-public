@@ -67,6 +67,7 @@ Never pick `-Force` without asking.
 - **git push/pull auth fails**: Git credential manager handles auth. Run `git -C "{{CONFIG_ROOT}}" push origin main` manually to diagnose. On a new machine the repo must be cloned first - see the README for the clone URL and first-time setup. (Do not reconstruct the URL from `{{USERNAME}}`: that placeholder is the *Windows* account name, not the GitHub account.)
 - **"Nothing to commit"**: Local config already matches the repo. This is normal.
 - **Doctor fails on "stale generated file(s)"**: someone edited a CLAUDE.md source (or a generated AGENTS.md directly) without running collect. Run `collect.ps1` to rebuild, then `deploy.ps1`.
+- **Doctor warns the public repo has fallen behind**: shared files changed in the private repo since the last publish. Run `publish.ps1` (in the config repo) for the list, then `-Apply`; review and commit in the public clone it names. Only this repo has `publish.ps1`; a public fork never sees this check.
 - **Merge conflicts after push pull**: Resolve manually in the repo directory, then retry.
 - **Missing secret warning on pull**: Expected on a new machine. Secrets are DPAPI-encrypted locally - they can't be synced. Create them with `Set-Secret.ps1`.
 - **Missing GITHUB_PERSONAL_ACCESS_TOKEN warning**: Only needed for the GitHub MCP server, not for git push/pull.
