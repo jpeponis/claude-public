@@ -64,7 +64,7 @@ then:
 Never pick `-Force` without asking.
 
 ## Troubleshooting
-- **git push/pull auth fails**: Git credential manager handles auth. Run `git -C "{{CONFIG_ROOT}}" push origin main` manually to diagnose. On a new machine the repo must be cloned first - see the README for the clone URL and first-time setup. (Do not reconstruct the URL from `{{USERNAME}}`: that placeholder is the *Windows* account name, not the GitHub account.)
+- **git push/pull auth fails**: git's configured credential helper handles auth (`git config --show-origin --get-regexp '^credential'` shows which; on a machine where `gh auth setup-git` has run, github.com uses `gh`). Run `git -C "{{CONFIG_ROOT}}" push origin main` manually to diagnose. On a new machine the repo must be cloned first - see the README for the clone URL and first-time setup. (Do not reconstruct the URL from `{{USERNAME}}`: that placeholder is the *Windows* account name, not the GitHub account.)
 - **"Nothing to commit"**: Local config already matches the repo. This is normal.
 - **Doctor fails on "stale generated file(s)"**: someone edited a CLAUDE.md source (or a generated AGENTS.md directly) without running collect. Run `collect.ps1` to rebuild, then `deploy.ps1`.
 - **Doctor warns the public repo has fallen behind**: shared files changed in the private repo since the last publish. Run `publish.ps1` (in the config repo) for the list, then `-Apply`; review and commit in the public clone it names. Only this repo has `publish.ps1`; a public fork never sees this check.
@@ -72,3 +72,14 @@ Never pick `-Force` without asking.
 - **Missing secret warning on pull**: Expected on a new machine. Secrets are DPAPI-encrypted locally - they can't be synced. Create them with `Set-Secret.ps1`.
 - **Missing GITHUB_PERSONAL_ACCESS_TOKEN warning**: Only needed for the GitHub MCP server, not for git push/pull.
 - **Deploy overwrites local edits**: The deploy script backs up existing files to `.backups/<timestamp>/` before overwriting, and a failed deploy rolls itself back from the same backups. Check there to recover.
+- **`sh.exe` or `bash.exe: *** fatal error - add_item ("\??\C:\Program Files\Git", "/", ...) failed, errno 1`**, usually followed by `fatal: could not read Username for 'https://github.com': terminal prompts disabled` and `ERROR: git pull failed`: this is **not** a sync-config failure, and nothing has changed when it happens. It's an MSYS/Git-for-Windows init race ([git-for-windows/git#6368](https://github.com/git-for-windows/git/issues/6368)): while the Windows status line (which CC wraps in Git Bash and `taskkill`s on every supersede) is churning bash processes, a bash killed mid-init holds a 15s spinlock and any MSYS process starting meanwhile aborts. Two MSYS processes are exposed. One is the Bash tool's own bash, if it launches the script (exit `0xC0000005` after a ~15s hang). The other is started by **git itself on every authenticated GitHub fetch or push**: `~/.gitconfig` sets the github.com credential helper to `!'C:\Program Files\GitHub CLI\gh.exe' auth git-credential` (the form `gh auth setup-git` writes), and a `!` helper runs as a shell snippet through `sh.exe`. So **launching through the PowerShell tool does not avoid it.** **Fix: retry, spaced ~20s apart.** A loop in one PowerShell tool call is what got pull and push through on 2026-09-20:
+  ```powershell
+  $log = (New-TemporaryFile).FullName
+  for ($i = 1; $i -le 5; $i++) {
+    powershell.exe -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" push *> $log
+    if (-not (Select-String -Path $log -Pattern 'add_item|could not read Username' -Quiet)) { break }
+    Start-Sleep -Seconds 20
+  }
+  Get-Content $log
+  ```
+  Retrying is safe: a pull that fails has deployed nothing, and a push that fails at its final step leaves its commit local, which the retry sends ("Pushing N existing local commit(s)"). (Diagnosis: session 2026-09-04; the credential-helper path, 2026-09-20.)

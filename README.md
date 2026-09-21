@@ -24,11 +24,27 @@ Two scope notes up front:
     *source* of the generated Codex instructions (see below)
   - `statusline-command.ps1` — Statusline showing user@machine, directory and git branch,
     subscription usage for the current five-hour window, and context-window fullness
-  - `agents/` — Agent definitions (file-manager, for bulk file operations that would otherwise
-    eat the main context; research-worker, the minimal-context worker used by
-    deep-research-tiered)
+  - `agents/` — Authored agent definitions (file-manager, for bulk file operations that would
+    otherwise eat the main context). `directed.md` and `research-worker.md` also land in
+    `~/.claude/agents/`, but they are **generated** — see `directed-agent/` below
+  - `refresh-directed-agent.ps1` — Rebuilds the generated agents in `~/.claude/agents/` from
+    `System Prompt.txt` plus the head fragments whenever either changed. Two callers:
+    `claude-sp` / `claude-or` run it before launching (exact), and a SessionStart hook in
+    `settings.json` runs it for sessions started any other way — one build late for those,
+    since Claude Code reads agent files before its SessionStart hooks fire. Silent on
+    success, because a SessionStart hook's stdout is injected into the model's context
   - `skills/<name>/SKILL.md` — Claude-only skills, one directory each (sync-config,
     deep-research-tiered)
+- `directed-agent/` — The `directed` subagent: `System Prompt.txt` wearing agent frontmatter,
+  so a delegated worker runs under the same rules as the session that spawned it rather than
+  the built-in general-purpose prompt (a subagent's file body *replaces* that prompt)
+  - `directed.head.md` / `research-worker.head.md` — The frontmatter (name, description,
+    tools, model) plus a one-line role note, one per agent. Edit these. research-worker is
+    the minimal-context worker used by deep-research-tiered: the same prompt behind a
+    restricted tool list
+  - `directed.md` / `research-worker.md` — **Generated; never edit.** `collect.ps1` rebuilds
+    them, `doctor.ps1` fails when they are stale, and they are excluded from collection so a
+    deployed copy is never adopted as if it had been authored in `~/.claude/agents/`
 - `shared/skills/` — Skills both products consume, deployed to **both** `~/.claude/skills/`
   and `~/.agents/skills/`. Empty in the public repo; the mechanism is what ships
 - `codex/` — The Codex CLI target
@@ -74,7 +90,10 @@ Two scope notes up front:
   by collect, deploy and doctor), token substitution in both directions, the
   derived-instructions build, file enumeration, profile discovery, managed-block injection,
   backup enumeration, JSON validation
-- `System Prompt.txt` — Custom system prompt (repo-native, not collected/deployed)
+- `System Prompt.txt` — Custom system prompt (repo-native, not collected/deployed). Used two
+  ways: `claude-sp` passes it as the session's system prompt, and the agents in
+  `directed-agent/` are generated from it, so an edit reaches both the session and every
+  `directed` subagent on the next `claude-sp` launch
 - `apply-terminal-keybinding.ps1` — Repo-native; injects a Shift+Enter→newline action into the
   local Windows Terminal `settings.json`. Run automatically at the end of `deploy.ps1`
 
@@ -394,9 +413,10 @@ because either direction can be the right one: `collect.ps1` keeps the local ver
 `deploy.ps1` takes the repo's.
 
 A final section checks the content rather than the plumbing: that every skill declares a
-`description`, that no synced markdown hardcodes a Desktop path, and that `research-worker.md`
-still agrees with `System Prompt.txt`, which it deliberately duplicates. These are the kind of
-mistake every other check passes straight over.
+`description`, and that no synced markdown hardcodes a Desktop path. These are the kind of
+mistake every other check passes straight over. (`research-worker.md` used to be checked
+here against `System Prompt.txt`, which it duplicated by hand; it is now generated from it,
+so the generated-file staleness check covers it.)
 
 The unit tests cover the half of the engine doctor cannot: manifest validation, membership
 filtering, divergence candidacy, token round trips, and the derived-instructions build:
@@ -509,8 +529,8 @@ search angles and key assertions, worker-model agents fan out to search and fetc
 each extracted claim gets a fast Haiku scan that escalates doubtful or key-assertion claims to
 two Sonnet adversarial-lens votes, and the session model synthesizes a cited report and runs a
 completeness critique against the key assertions. Every spawned agent uses the lightweight
-`research-worker` agent definition (`global/agents/research-worker.md`) — a barebones system
-prompt with no MCP tools or skills.
+`research-worker` agent definition (generated into `directed-agent/research-worker.md`) — the
+system prompt behind a restricted tool list, with no MCP tools or skills.
 
 `enableWorkflows` ships as `false` in `global/settings.json`, to keep the Workflow tool's
 large schema out of context in ordinary sessions. The `/deep-research-tiered` skill turns it

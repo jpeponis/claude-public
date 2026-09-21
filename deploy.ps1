@@ -103,11 +103,10 @@ foreach ($dir in $plan.Dirs) {
 foreach ($pair in $allPairs) {
     $pair.Missing = -not (Test-Path $pair.Source)
     if ($pair.Missing) { continue }
-    $pair.Content = Expand-Tokens -Text (Get-Content -Path $pair.Source -Raw -Encoding UTF8) `
+    $pair.Content = Expand-Tokens -Text (Read-TextFile $pair.Source) `
                                   -UserName $username -ConfigRoot $configRoot -Desktop $desktopTok
     $pair.Existed = Test-Path $pair.Dest
-    $pair.Changed = -not ($pair.Existed -and
-                          ((Get-Content -Path $pair.Dest -Raw -Encoding UTF8) -eq $pair.Content))
+    $pair.Changed = -not ($pair.Existed -and ((Read-TextFile $pair.Dest) -eq $pair.Content))
 }
 
 # --- Backup the files this run is actually going to overwrite ----------------
@@ -197,9 +196,15 @@ try {
 # Bounded by the previous run's manifest (read above). A file we never deployed is
 # never deleted, so a user's own commands/my-thing.md survives; a skill removed from
 # the repo does not.
+#
+# Nor is anything inside a foreign member (manifest ForeignMembers): it belongs to
+# another program even if an earlier deploy wrote it, so it is released -- dropped
+# from the deployed manifest below -- and left where it is.
 
+$released = 0
 foreach ($stale in ($previousDests | Where-Object { $_ -and ($_ -notin $deployedDests) })) {
     if (-not (Test-Path $stale)) { continue }
+    if (Test-ForeignDestination -Manifest $plan -Path $stale) { $released++; continue }
     if ($DryRun) {
         Say "[DEL]  $stale (removed from repo)" 'Red' -Plan
     } else {
@@ -245,7 +250,10 @@ if (-not $DryRun) {
     $previousEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $head = (& git -C $repoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+        # Index, not '| Select-Object -First 1': that stops the pipeline early, which in
+        # 5.1 kills git and leaves $LASTEXITCODE at -1, so the file was written only
+        # when git happened to exit first.
+        $head = @(& git -C $repoRoot rev-parse HEAD 2>$null)[0]
         if ($LASTEXITCODE -eq 0 -and $head) {
             Write-TextFile -Path (Join-Path $repoRoot '.last-deployed') -Content ([string]$head).Trim()
         }
@@ -269,9 +277,10 @@ if ($oldBackups.Count -gt 0 -and -not $DryRun) {
 }
 
 Write-Host ""
-$adoptNote = ""
-if ($adopted -gt 0) { $adoptNote = ", adopted $adopted" }
-Say "Wrote $written files, unchanged $unchanged, skipped $skipped, pruned $deleted$adoptNote." 'Cyan' -Plan
+$notes = ""
+if ($adopted -gt 0)  { $notes += ", adopted $adopted" }
+if ($released -gt 0) { $notes += ", released $released (another program's; left in place)" }
+Say "Wrote $written files, unchanged $unchanged, skipped $skipped, pruned $deleted$notes." 'Cyan' -Plan
 
 # --- PowerShell profiles: additive, and BOTH editions ------------------------
 # Windows PowerShell 5.1 and PowerShell 7+ read different profile paths. Wiring only

@@ -155,6 +155,36 @@ Assert-Throws {
 } "one skill owned by two artifacts sharing a destination throws"
 Remove-Item (Join-Path $repo2 'global') -Recurse -Force
 
+# --- Foreign members: another program's entries inside a skills root -----------
+Section "Foreign members"
+
+New-Item -ItemType Directory -Path (Join-Path $localSkills 'synced\abc\pptx') -Force | Out-Null
+Write-TextFile -Path (Join-Path $localSkills 'synced\.bucket-abc') -Content ''
+Write-TextFile -Path (Join-Path $localSkills 'synced\abc\pptx\__init__.py') -Content ''
+$claudeArt.ForeignMembers = @('synced')
+$claudeFiles2 = @(Select-ArtifactLocalFiles -Artifact $claudeArt -MemberIndex $idx | ForEach-Object RelPath)
+Assert-Eq ($claudeFiles2 -join ',') 'private-thing\SKILL.md' "collect never reads a foreign member"
+
+$fm = @{ Files = @(); Dirs = @($claudeArt) }
+Assert-True (Test-ForeignDestination -Manifest $fm -Path (Join-Path $localSkills 'synced\abc\pptx\__init__.py')) "a file inside a foreign member is foreign"
+Assert-True (Test-ForeignDestination -Manifest $fm -Path (Join-Path $localSkills.ToUpper() 'synced\.bucket-abc')) "the match ignores case, as Windows paths do"
+Assert-True (-not (Test-ForeignDestination -Manifest $fm -Path (Join-Path $localSkills 'private-thing\SKILL.md'))) "a managed skill is not foreign"
+Assert-True (-not (Test-ForeignDestination -Manifest $fm -Path (Join-Path $localSkills 'synced-notes\SKILL.md'))) "a member merely prefixed by the name is not foreign"
+Assert-True (-not (Test-ForeignDestination -Manifest $fm -Path (Join-Path $tmp 'elsewhere\synced\x'))) "outside every destination is not foreign"
+Assert-True (Test-ForeignDestination -Manifest $m -Path 'X:\ch\skills\synced\x\SKILL.md') "the real manifest keeps Claude Code's synced cache foreign"
+
+# --- Reading files back: empty is '', not $null ----------------------------------
+Section "Empty files"
+
+$empty = Join-Path $tmp 'empty\__init__.py'
+Write-TextFile -Path $empty -Content ''
+Assert-True ($null -ne (Read-TextFile $empty)) "an empty file reads as a string, not null"
+$emptyExpected = Expand-Tokens -Text (Read-TextFile $empty) -UserName 'u' -ConfigRoot 'c' -Desktop 'd'
+Assert-True ((Read-TextFile $empty) -eq $emptyExpected) "an empty deployed file matches its empty source"
+$bom = Join-Path $tmp 'bom.md'
+[System.IO.File]::WriteAllText($bom, 'text', [System.Text.UTF8Encoding]::new($true))
+Assert-Eq (Read-TextFile $bom) 'text' "a UTF-8 BOM is dropped, as Get-Content -Encoding UTF8 drops it"
+
 # --- Divergence candidacy -----------------------------------------------------
 Section "Divergence candidacy"
 
@@ -176,6 +206,12 @@ Assert-True (@($cand | Where-Object { $_.Id -eq 'memory' }).Count -eq 1) "change
 Assert-True (@($cand | Where-Object { $_.Id -eq 'gen' }).Count -eq 0) "repository-authoritative change is NOT a candidate"
 $skillCand = @($cand | Where-Object { $_.Id -eq 'skills' })[0]
 Assert-Eq $skillCand.LocalPath 'X:\ch\skills\website\SKILL.md' "dir candidate maps to the CollectFrom path"
+
+# A machine that last deployed while the repo still carried a foreign member must be
+# able to push after its removal: collect never reads it, so nothing can collide.
+$dm.Dirs[0].ForeignMembers = @('synced')
+$candF = @(Get-DivergenceCandidates -ChangedRepoPaths @('shared/skills/synced/x/__init__.py', 'shared/skills/website/SKILL.md') -Manifest $dm)
+Assert-Eq (@($candF | ForEach-Object RepoPath) -join ',') 'shared/skills/website/SKILL.md' "a foreign member's repo change is not a divergence candidate"
 
 # --- Derived instructions build ------------------------------------------------
 Section "Derived instructions build"
@@ -232,6 +268,66 @@ Assert-True ((Get-Content (Join-Path $repo3 'codex\AGENTS.md') -Raw) -notmatch '
 
 $r3 = @(Update-GeneratedArtifacts -RepoRoot $repo3 -Manifest $gm -Check)
 Assert-Eq $r3[0].State 'current' "freshly built output reports current"
+
+# --- Derived agent definition ---------------------------------------------------
+Section "Derived agent definition"
+
+$headOk = "---`nname: directed`ndescription: `"worker`"`nmodel: inherit`n---`n`nRole line.`n"
+$agent = Build-AgentDefinition -SourceText "###RULES###`r`n- be terse`r`n" -HeadText $headOk `
+                               -SourceLabel 'System Prompt.txt' -HeadLabel 'directed-agent\directed.head.md'
+Assert-True ($agent.StartsWith("---`n# GENERATED from System Prompt.txt + directed-agent\directed.head.md")) "marker is a YAML comment inside the frontmatter"
+Assert-True ($agent -match '(?m)^name: directed$') "frontmatter survives"
+Assert-True ($agent -match '(?s)---\n\nRole line\.\n\n###RULES###\n- be terse\n$') "head prose, then the prompt verbatim, LF-only, one trailing newline"
+Assert-True ($agent -notmatch "`r") "CRLF source is normalised to LF"
+Assert-Throws { Build-AgentDefinition -SourceText 'x' -HeadText "no frontmatter" -SourceLabel 's' -HeadLabel 'h' } "head without a frontmatter block throws"
+Assert-Throws { Build-AgentDefinition -SourceText 'x' -HeadText "---`ndescription: d`n---`n" -SourceLabel 's' -HeadLabel 'h' } "head without a name throws"
+
+# Manifest dispatch: Builder = 'agent' builds through Build-AgentDefinition, and a
+# missing head fragment is a refusal, not an agent with no frontmatter.
+$repo4 = Join-Path $tmp 'repo4'
+New-Item -ItemType Directory -Path (Join-Path $repo4 'directed-agent') -Force | Out-Null
+Write-TextFile -Path (Join-Path $repo4 'System Prompt.txt') -Content "###RULES###`n- be terse`n"
+$agentArt = @{ Id = 'directed-agent'; Repo = 'directed-agent\directed.md'; Destinations = @('X:\ch\agents\directed.md'); Authority = 'repository'
+               GeneratedFrom = 'System Prompt.txt'; GeneratedExtra = 'directed-agent\directed.head.md'; Builder = 'agent' }
+$am = @{ Files = @($agentArt); Dirs = @() }
+Assert-Throws { Update-GeneratedArtifacts -RepoRoot $repo4 -Manifest $am -Check } "agent build without its head fragment throws"
+Write-TextFile -Path (Join-Path $repo4 'directed-agent\directed.head.md') -Content $headOk
+$r4 = @(Update-GeneratedArtifacts -RepoRoot $repo4 -Manifest $am)
+Assert-Eq $r4[0].State 'rebuilt' "agent build writes the output"
+Assert-True ((Get-Content (Join-Path $repo4 'directed-agent\directed.md') -Raw) -match '(?m)^# GENERATED') "written agent carries the marker"
+Assert-Eq (@(Update-GeneratedArtifacts -RepoRoot $repo4 -Manifest $am -Check))[0].State 'current' "freshly built agent reports current"
+
+# Collection exclusion by a FILE artifact: the generated agent deployed into
+# ~/.claude/agents must not be collected back by the claude-agents dir artifact.
+$localAgents = Join-Path $tmp 'claude-agents'
+New-Item -ItemType Directory -Path $localAgents -Force | Out-Null
+Write-TextFile -Path (Join-Path $localAgents 'directed.md') -Content 'generated'
+Write-TextFile -Path (Join-Path $localAgents 'file-manager.md') -Content 'mine'
+$agentsArt = @{ Id = 'claude-agents'; Repo = 'global\agents'; Destinations = @($localAgents); Authority = 'installed'
+                CollectFrom = $localAgents; Filter = '*.md'; Recurse = $false; ExcludeMembersOf = 'directed-agent' }
+$idx4 = @{}
+$idx4['directed-agent'] = @(Get-ArtifactMembers -RepoRoot $repo4 -Artifact $agentArt)
+Assert-Eq ($idx4['directed-agent'] -join ',') 'directed.md' "a file artifact's one member is its own filename"
+$collected = @(Select-ArtifactLocalFiles -Artifact $agentsArt -MemberIndex $idx4 | ForEach-Object RelPath)
+Assert-Eq ($collected -join ',') 'file-manager.md' "the generated agent is not collected back"
+Test-ArtifactManifest -Manifest @{ Files = @($agentArt); Dirs = @($agentsArt) } -RepoRoot $repo4
+Assert-True $true "manifest accepts ExcludeMembersOf naming a file artifact"
+
+# ExcludeMembersOf as a list: two generated agents, both kept out of collection.
+$workerArt = @{ Id = 'worker-agent'; Repo = 'directed-agent\research-worker.md'; Destinations = @('X:\ch\agents\research-worker.md'); Authority = 'repository'
+                GeneratedFrom = 'System Prompt.txt'; GeneratedExtra = 'directed-agent\research-worker.head.md'; Builder = 'agent' }
+Write-TextFile -Path (Join-Path $repo4 'directed-agent\research-worker.md') -Content 'generated'
+Write-TextFile -Path (Join-Path $localAgents 'research-worker.md') -Content 'generated'
+$agentsArt.ExcludeMembersOf = @('directed-agent', 'worker-agent')
+$idx4['worker-agent'] = @(Get-ArtifactMembers -RepoRoot $repo4 -Artifact $workerArt)
+$collected2 = @(Select-ArtifactLocalFiles -Artifact $agentsArt -MemberIndex $idx4 | ForEach-Object RelPath)
+Assert-Eq ($collected2 -join ',') 'file-manager.md' "every listed owner's member is excluded"
+Test-ArtifactManifest -Manifest @{ Files = @($agentArt, $workerArt); Dirs = @($agentsArt) } -RepoRoot $repo4
+Assert-True $true "manifest accepts an ExcludeMembersOf list"
+Assert-Throws {
+    Test-ArtifactManifest -Manifest @{ Files = @($agentArt); Dirs = @(@{ Id = 'd'; Repo = 'global\agents'; Destinations = @('X:\a'); Authority = 'installed'
+        CollectFrom = 'X:\a'; Filter = '*.md'; Recurse = $false; ExcludeMembersOf = @('directed-agent', 'nope') }) }
+} "an unknown id anywhere in the list throws"
 
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue

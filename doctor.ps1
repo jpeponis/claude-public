@@ -157,9 +157,9 @@ foreach ($set in $plan.Dirs) {
 
 foreach ($p in $deployedPairs) {
     if (-not (Test-Path $p.Repo) -or -not (Test-Path $p.Local)) { continue }   # absence reported above
-    $expected = Expand-Tokens -Text (Get-Content $p.Repo -Raw -Encoding UTF8) `
+    $expected = Expand-Tokens -Text (Read-TextFile $p.Repo) `
                               -UserName $env:USERNAME -ConfigRoot $configRoot -Desktop $desktopTok
-    if ((Get-Content $p.Local -Raw -Encoding UTF8) -ne $expected) { $drifted += $p.Label }
+    if ((Read-TextFile $p.Local) -ne $expected) { $drifted += $p.Label }
 }
 
 if ($drifted.Count -eq 0) {
@@ -383,37 +383,10 @@ if ($literalPathHits.Count -eq 0) {
     Check FAIL "literal Desktop path in: $($literalPathHits -join ', ')" "use {{CONFIG_ROOT}} or {{DESKTOP}}, which deploy.ps1 expands per machine"
 }
 
-# research-worker.md deliberately carries the same prompt as "System Prompt.txt", so that
-# spawned workers hold the same disposition the session does. It is the one duplication
-# here kept on purpose -- and a deliberate copy is no less prone to drifting than an
-# accidental one, since nothing about editing either file mentions the other.
-#
-# Checked as a SUBSET rather than an exact match, because the worker legitimately omits
-# the opening line, which addresses the session model. Every line the worker DOES carry
-# must read the way the system prompt reads it. This catches the drift from either side:
-# editing "System Prompt.txt" and forgetting the agent fails just as loudly.
-$promptPath = Join-Path $repoRoot 'System Prompt.txt'
-$workerPath = Join-Path $repoRoot 'global\agents\research-worker.md'
-
-if (-not (Test-Path $promptPath) -or -not (Test-Path $workerPath)) {
-    Check WARN "cannot compare the worker prompt: System Prompt.txt or research-worker.md is missing"
-} else {
-    $promptLines = @([System.IO.File]::ReadAllLines($promptPath) | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    $workerAll   = @([System.IO.File]::ReadAllLines($workerPath))
-    $fmEnd       = [array]::IndexOf($workerAll, '---', 1)
-    $workerLines = @($workerAll[($fmEnd + 1)..($workerAll.Count - 1)] | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    $orphans     = @($workerLines | Where-Object { $_ -notin $promptLines })
-
-    if ($fmEnd -lt 1) {
-        Check FAIL "research-worker.md has no frontmatter block" "an agent definition needs name/description/tools frontmatter"
-    } elseif ($orphans.Count -eq 0) {
-        Check OK "research-worker's prompt matches System Prompt.txt ($($workerLines.Count) lines, subset)"
-    } else {
-        $sample = $orphans[0]
-        if ($sample.Length -gt 60) { $sample = $sample.Substring(0, 60) + '...' }
-        Check FAIL "research-worker's prompt has drifted from System Prompt.txt in $($orphans.Count) line(s) -- first: `"$sample`"" "reconcile the two; they are the same prompt by design"
-    }
-}
+# research-worker.md is generated from "System Prompt.txt" (see the directed-agent manifest
+# entries in lib\Common.ps1), so the subset comparison that used to live here is covered
+# by the generated-artifact staleness check above: the worker cannot drift from the
+# prompt any more, only its head fragment can change.
 
 # --- Codex target ------------------------------------------------------------
 # The Codex half of the manifest. Scope note: the personal profile is CLI-flag-only
@@ -521,7 +494,7 @@ $staleGen = @()
 try {
     $staleGen = @(Update-GeneratedArtifacts -RepoRoot $repoRoot -Manifest $plan -Check | Where-Object { $_.State -eq 'stale' })
     if ($staleGen.Count -eq 0) {
-        Check OK "generated AGENTS.md files match their sources"
+        Check OK "generated files (Codex AGENTS.md, directed agent) match their sources"
     } else {
         Check FAIL "stale generated file(s): $(@($staleGen | ForEach-Object Label) -join ', ')" "run collect.ps1 (rebuilds them), then deploy.ps1"
     }
@@ -536,7 +509,8 @@ try {
 # 'claude-sp(sp)?\b', not 'claude-sp': the bare form is a substring of the innocent
 # word 'Claude-specific'. Same for claude-or vs 'claude-orchestrated' etc.
 $lintPattern = '(?i)claude-in-chrome|claude-or(-sp)?(sp)?\b|claude-sp(sp)?\b|ANTHROPIC_|OpenRouter|Tool Search|file-manager agent'
-foreach ($g in @($plan.Files | Where-Object { $_.GeneratedFrom })) {
+# Codex outputs only: the directed agent is Claude's own, and may name Claude tooling freely.
+foreach ($g in @($plan.Files | Where-Object { $_.GeneratedFrom -and $_.Builder -ne 'agent' })) {
     $gp = Join-Path $repoRoot $g.Repo
     if (-not (Test-Path $gp)) { continue }
     $hits = @()
