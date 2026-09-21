@@ -15,6 +15,18 @@ function Write-TextFile {
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+# --- Reading one back: '' for an empty file, never $null ---------------------
+# Get-Content -Raw returns $null for a 0-byte file, and $null -eq '' is false, so every
+# empty file (a Python package's __init__.py) compared as changed on every deploy and
+# drifted in every doctor run. A [string] cast does not rescue it -- the value stays
+# null through the cast, in 5.1 and 7 alike. ReadAllText returns '' and, like
+# Get-Content -Encoding UTF8, drops a UTF-8 BOM. Convert-Path because .NET resolves a
+# relative path against the process directory, not the PowerShell location.
+function Read-TextFile {
+    param([Parameter(Mandatory)][string]$Path)
+    return [System.IO.File]::ReadAllText((Convert-Path -LiteralPath $Path), [System.Text.Encoding]::UTF8)
+}
+
 # --- Desktop, resolved the same way Documents is -----------------------------
 # "$env:USERPROFILE\Desktop" is wrong on any machine with OneDrive Known Folder Move
 # enabled, which is the Windows 11 default on a consumer setup: the real Desktop is
@@ -52,17 +64,28 @@ function Get-DesktopPath {
 #   CollectFrom   (installed only) exactly ONE destination collect reads from.
 #                 For a multi-destination artifact the others are projections:
 #                 deploy refreshes them, collect ignores them.
-#   GeneratedFrom / GeneratedExtra
-#                 (repository only) this file is BUILT from other repo files by
-#                 Build-DerivedInstructions -- see Update-GeneratedArtifacts.
+#   GeneratedFrom / GeneratedExtra / Builder
+#                 (repository only) this file is BUILT from other repo files -- see
+#                 Get-GeneratedArtifactContent. Builder picks the recipe: absent means
+#                 Build-DerivedInstructions (a Codex AGENTS.md), 'agent' means
+#                 Build-AgentDefinition (a Claude subagent whose body is the source and
+#                 whose frontmatter is the GeneratedExtra fragment).
 #   Filter/Recurse/Name   (Dirs only) same meaning as before.
 #   MembersFromRepo       (Dirs) collect only top-level entries that already exist
 #                 in the repo directory -- the repo decides membership. Used by
 #                 shared skills: which skills are shared is a repo decision, so a
 #                 new local-only skill lands in the claude-skills set, not here.
 #   ExcludeMembersOf      (Dirs) skip local top-level entries owned by the named
-#                 artifact. claude-skills excludes shared-skills' members so a
-#                 shared skill is not collected into global\skills a second time.
+#                 artifact(s); one id or a list. claude-skills excludes shared-skills'
+#                 members so a shared skill is not collected into global\skills a
+#                 second time; claude-agents excludes the generated agents (FILE
+#                 artifacts, each owning just its own filename) so a generated agent
+#                 deployed into ~/.claude/agents is not collected back as authored.
+#   ForeignMembers        (Dirs) top-level entry names another program owns inside
+#                 this artifact's destination. collect never reads them, and deploy
+#                 never prunes them -- a file an earlier deploy wrote there is released
+#                 from the deployed manifest, not deleted. claude-skills names 'synced',
+#                 Claude Code's own cache of the skills it downloads from claude.ai.
 #   Optional      (Dirs) doctor reports an empty repo set as OK, not a warning.
 #
 # Deliberately NOT in this manifest, each for a reason worth keeping:
@@ -75,7 +98,8 @@ function Get-DesktopPath {
 #   - Repo-native scripts ("System Prompt.txt", lib\, and the launcher / doctor /
 #     restore / publish scripts). They are run FROM the repo, not deployed.
 #   - codex\AGENTS.extra.md and codex\project-desktop\AGENTS.extra.md: source
-#     fragments for the generated AGENTS.md files, edited in the repo.
+#     fragments for the generated AGENTS.md files, edited in the repo. Likewise
+#     directed-agent\directed.head.md, the frontmatter fragment of the directed agent.
 #   - ~/.codex machine state (auth.json, config.toml, databases, caches, trust
 #     records, default.rules). Machine-generated, never synced.
 #   - Codex rules: nothing portable exists yet. When one does, add a
@@ -117,6 +141,24 @@ function Get-ArtifactManifest {
             @{ Id = 'codex-desktop-memory'; Repo = 'codex\project-desktop\AGENTS.md'; Authority = 'repository'
                Destinations = @("$DesktopDir\AGENTS.md")
                GeneratedFrom = 'project-desktop\CLAUDE.md'; GeneratedExtra = 'codex\project-desktop\AGENTS.extra.md' }
+            # The directed subagent is "System Prompt.txt" wearing agent frontmatter, so the
+            # prompt a delegated worker runs under is the one the session runs under. Built,
+            # not authored: a hand copy of the prompt (research-worker's body was one) drifts
+            # the first time the prompt is edited. Lives outside global\agents so the
+            # claude-agents dir artifact cannot collect it back; that artifact excludes it
+            # by name instead. The deployed copy is also refreshed at every session start
+            # by global\refresh-directed-agent.ps1 (a SessionStart hook in settings.json).
+            @{ Id = 'directed-agent';   Repo = 'directed-agent\directed.md';    Authority = 'repository'
+               Destinations = @("$ClaudeHome\agents\directed.md")
+               GeneratedFrom = 'System Prompt.txt'; GeneratedExtra = 'directed-agent\directed.head.md'; Builder = 'agent' }
+            # research-worker (deep-research-tiered's worker) is the same prompt behind a
+            # restricted tool list. It was a hand copy, and doctor caught it five lines
+            # adrift; now it is built from the same source, and can only differ in its head.
+            @{ Id = 'research-worker-agent'; Repo = 'directed-agent\research-worker.md'; Authority = 'repository'
+               Destinations = @("$ClaudeHome\agents\research-worker.md")
+               GeneratedFrom = 'System Prompt.txt'; GeneratedExtra = 'directed-agent\research-worker.head.md'; Builder = 'agent' }
+            @{ Id = 'directed-refresh'; Repo = 'global\refresh-directed-agent.ps1'; Authority = 'installed'
+               Destinations = @("$ClaudeHome\refresh-directed-agent.ps1"); CollectFrom = "$ClaudeHome\refresh-directed-agent.ps1" }
         )
         # Every file matching Filter is synced as a unit, in both directions:
         # deleting one locally removes it from the repo on the next collect, and
@@ -131,15 +173,18 @@ function Get-ArtifactManifest {
             @{ Id = 'shared-skills'; Name = 'shared skills'; Repo = 'shared\skills'; Authority = 'installed'
                Destinations = @("$ClaudeHome\skills", "$AgentsHome\skills"); CollectFrom = "$ClaudeHome\skills"
                Filter = '*'; Recurse = $true; MembersFromRepo = $true; Optional = $true }
+            # 'synced' is Claude Code's cache of claude.ai skills (docs, docx, pdf, ...),
+            # rewritten by Claude Code itself. Collected once by accident (2026-09-19):
+            # 217 files, no SKILL.md, and a deploy fighting the program that owns them.
             @{ Id = 'claude-skills'; Name = 'claude skills'; Repo = 'global\skills'; Authority = 'installed'
                Destinations = @("$ClaudeHome\skills"); CollectFrom = "$ClaudeHome\skills"
-               Filter = '*'; Recurse = $true; ExcludeMembersOf = 'shared-skills' }
+               Filter = '*'; Recurse = $true; ExcludeMembersOf = 'shared-skills'; ForeignMembers = @('synced') }
             @{ Id = 'codex-skills'; Name = 'codex-only skills'; Repo = 'codex\skills'; Authority = 'installed'
                Destinations = @("$AgentsHome\skills"); CollectFrom = "$AgentsHome\skills"
                Filter = '*'; Recurse = $true; ExcludeMembersOf = 'shared-skills'; Optional = $true }
             @{ Id = 'claude-agents'; Name = 'claude agents'; Repo = 'global\agents'; Authority = 'installed'
                Destinations = @("$ClaudeHome\agents"); CollectFrom = "$ClaudeHome\agents"
-               Filter = '*.md'; Recurse = $false }
+               Filter = '*.md'; Recurse = $false; ExcludeMembersOf = @('directed-agent', 'research-worker-agent') }
             @{ Id = 'codex-agents'; Name = 'codex agents'; Repo = 'codex\agents'; Authority = 'installed'
                Destinations = @("$CodexHome\agents"); CollectFrom = "$CodexHome\agents"
                Filter = '*.toml'; Recurse = $false; Optional = $true }
@@ -178,8 +223,10 @@ function Test-ArtifactManifest {
         } elseif ($a.CollectFrom) {
             throw "manifest: artifact $($a.Id) is repository-authoritative and must not set CollectFrom"
         }
-        if ($a.ExcludeMembersOf -and ($a.ExcludeMembersOf -notin $ids)) {
-            throw "manifest: artifact $($a.Id): ExcludeMembersOf names unknown artifact '$($a.ExcludeMembersOf)'"
+        foreach ($ex in @($a.ExcludeMembersOf | Where-Object { $_ })) {
+            if ($ex -notin $ids) {
+                throw "manifest: artifact $($a.Id): ExcludeMembersOf names unknown artifact '$ex'"
+            }
         }
     }
 
@@ -228,10 +275,37 @@ function Select-ArtifactLocalFiles {
         $files = @($files | Where-Object { ($_.RelPath -split '[\\/]')[0] -in $members })
     }
     if ($Artifact.ExcludeMembersOf) {
-        $excluded = @($MemberIndex[$Artifact.ExcludeMembersOf])
+        $excluded = @()
+        foreach ($ex in @($Artifact.ExcludeMembersOf)) { $excluded += @($MemberIndex[$ex]) }
         $files = @($files | Where-Object { ($_.RelPath -split '[\\/]')[0] -notin $excluded })
     }
+    if ($Artifact.ForeignMembers) {
+        $files = @($files | Where-Object { -not (Test-ForeignMember -Artifact $Artifact -RelPath $_.RelPath) })
+    }
     return @($files)
+}
+
+# Whether a path relative to a dir artifact's root lies in one of its ForeignMembers.
+# Keyed on the first segment, like every other membership rule.
+function Test-ForeignMember {
+    param([Parameter(Mandatory)]$Artifact, [Parameter(Mandatory)][string]$RelPath)
+    return (($RelPath -split '[\\/]')[0] -in @($Artifact.ForeignMembers))
+}
+
+# Whether an absolute local path lies in any dir artifact's foreign member. deploy asks
+# this of every file its previous run wrote and this run did not, before pruning it.
+function Test-ForeignDestination {
+    param([Parameter(Mandatory)]$Manifest, [Parameter(Mandatory)][string]$Path)
+    foreach ($dir in @($Manifest.Dirs | Where-Object { $_.ForeignMembers })) {
+        foreach ($root in @($dir.Destinations)) {
+            $prefix = $root.TrimEnd('\', '/') + '\'
+            if ($Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -and
+                (Test-ForeignMember -Artifact $dir -RelPath $Path.Substring($prefix.Length))) {
+                return $true
+            }
+        }
+    }
+    return $false
 }
 
 # Which installed-authoritative artifacts a set of repo-side changes could collide
@@ -260,6 +334,9 @@ function Get-DivergenceCandidates {
         foreach ($p in @($ChangedRepoPaths)) {
             if ($p -like "$prefix/*") {
                 $rel = $p.Substring($prefix.Length + 1)
+                # Collect never reads a foreign member, so a repo-side change to one
+                # (its removal, above all) cannot collide with anything collect writes.
+                if (Test-ForeignMember -Artifact $a -RelPath $rel) { continue }
                 # String concat, not Join-Path: PowerShell 5.1's Join-Path validates
                 # that the DRIVE exists, which makes this pure function untestable
                 # with synthetic paths and couples candidacy to the filesystem.
@@ -318,6 +395,77 @@ function Build-DerivedInstructions {
     return $out.Replace("`r`n", "`n")
 }
 
+# --- Derived agent definition (the directed subagent) -------------------------
+# directed-agent\directed.md is "System Prompt.txt" wearing the frontmatter from
+# directed-agent\directed.head.md: the head first (Claude Code reads the agent's name,
+# description and model from it), any prose the head carries after its frontmatter, then
+# the prompt verbatim. A subagent's file body REPLACES the built-in general-purpose
+# prompt outright, so this is how a delegated worker runs under the same rules as the
+# session that spawned it, with nothing else in between.
+#
+# The GENERATED marker goes inside the frontmatter as a YAML comment, not at the top of
+# the body: the body is the subagent's system prompt, and a marker there would be read by
+# the model on every spawn.
+function Build-AgentDefinition {
+    param(
+        [Parameter(Mandatory)][string]$SourceText,
+        [Parameter(Mandatory)][string]$HeadText,
+        [Parameter(Mandatory)][string]$SourceLabel,
+        [Parameter(Mandatory)][string]$HeadLabel
+    )
+    $head = $HeadText.Replace("`r`n", "`n")
+    if ($head -notmatch '(?s)^---\n.*?\n---\n') {
+        throw "$HeadLabel must open with a YAML frontmatter block (--- ... ---); Claude Code does not load an agent without one"
+    }
+    if ($head -notmatch '(?m)^name:\s*\S')        { throw "$HeadLabel frontmatter declares no name" }
+    if ($head -notmatch '(?m)^description:\s*\S') { throw "$HeadLabel frontmatter declares no description" }
+
+    $note = "# GENERATED from $SourceLabel + $HeadLabel -- do not edit this file; edit the sources, then run collect.ps1"
+    $head = "---`n" + $note + "`n" + $head.Substring(4)
+    $body = $SourceText.Replace("`r`n", "`n").Trim()
+    return $head.TrimEnd() + "`n`n" + $body + "`n"
+}
+
+# The content one generated artifact should have right now, built from its sources in
+# the repo. Shared by Update-GeneratedArtifacts (writes the repo copy) and the
+# SessionStart hook global\refresh-directed-agent.ps1 (writes the deployed copy), so the
+# two can never disagree about what "current" means.
+function Get-GeneratedArtifactContent {
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)]$Artifact
+    )
+    $srcPath = Join-Path $RepoRoot $Artifact.GeneratedFrom
+    if (-not (Test-Path $srcPath)) {
+        throw "generated artifact $($Artifact.Id): source $($Artifact.GeneratedFrom) is missing from the repo"
+    }
+    $source = Get-Content $srcPath -Raw -Encoding UTF8
+    $extraText = ''
+    $extraLabel = $null
+    if ($Artifact.GeneratedExtra) {
+        $extraPath = Join-Path $RepoRoot $Artifact.GeneratedExtra
+        if (Test-Path $extraPath) {
+            $extraText  = Get-Content $extraPath -Raw -Encoding UTF8
+            $extraLabel = $Artifact.GeneratedExtra
+        }
+    }
+    switch ($Artifact.Builder) {
+        'agent' {
+            # The head is the frontmatter; without it there is no agent, so a missing
+            # fragment is a refusal here rather than an optional extra as it is below.
+            if (-not $extraLabel) {
+                throw "generated artifact $($Artifact.Id): head fragment $($Artifact.GeneratedExtra) is missing from the repo"
+            }
+            return Build-AgentDefinition -SourceText $source -HeadText $extraText `
+                                         -SourceLabel $Artifact.GeneratedFrom -HeadLabel $extraLabel
+        }
+        default {
+            return Build-DerivedInstructions -SourceText $source -ExtraText $extraText `
+                                             -SourceLabel $Artifact.GeneratedFrom -ExtraLabel $extraLabel
+        }
+    }
+}
+
 # Rebuild every generated artifact in the repo (or, with -Check, report which are
 # stale without writing). collect.ps1 rebuilds after collection so the outputs track
 # freshly collected sources; doctor.ps1 checks so a hand edit to a source that never
@@ -330,21 +478,7 @@ function Update-GeneratedArtifacts {
     )
     $results = @()
     foreach ($a in @($Manifest.Files | Where-Object { $_.GeneratedFrom })) {
-        $srcPath = Join-Path $RepoRoot $a.GeneratedFrom
-        if (-not (Test-Path $srcPath)) {
-            throw "generated artifact $($a.Id): source $($a.GeneratedFrom) is missing from the repo"
-        }
-        $extraText = ''
-        $extraLabel = $null
-        if ($a.GeneratedExtra) {
-            $extraPath = Join-Path $RepoRoot $a.GeneratedExtra
-            if (Test-Path $extraPath) {
-                $extraText  = Get-Content $extraPath -Raw -Encoding UTF8
-                $extraLabel = $a.GeneratedExtra
-            }
-        }
-        $built = Build-DerivedInstructions -SourceText (Get-Content $srcPath -Raw -Encoding UTF8) `
-                                           -ExtraText $extraText -SourceLabel $a.GeneratedFrom -ExtraLabel $extraLabel
+        $built = Get-GeneratedArtifactContent -RepoRoot $RepoRoot -Artifact $a
         $outPath = Join-Path $RepoRoot $a.Repo
         $current = $null
         # Line-ending-insensitive comparison, same reason publish.ps1 normalizes:

@@ -8,7 +8,7 @@ notes live in `{{DESKTOP}}/CLAUDE.md`; how the config is synced is in `{{CONFIG_
 - Before dispatching any file-manager task, verify the destination path exists (a one-second `ls` beats a 45-second agent round-trip that bounces back with a question).
 
 ## Config layout
-- Settings, skills, agents and shell functions live under `$env:USERPROFILE\.claude\`, deployed there from `{{CONFIG_ROOT}}`. **Edit the repo, then `/sync-config push`** — editing the deployed copy works until the next deploy overwrites it.
+- Settings, skills, agents and shell functions live under `$env:USERPROFILE\.claude\`, deployed there from `{{CONFIG_ROOT}}`. **Edit the deployed copy, then `/sync-config push`.** Push collects deployed → repo, so a repo edit made by hand is overwritten by the next push, and a deployed edit you never push is overwritten by the next pull or `deploy.ps1` — so edit deployed, and push promptly. Exceptions, edited in the repo: `System Prompt.txt`, the `directed-agent/*.head.md` fragments, and the scripts themselves. The generated files (`codex/AGENTS.md`, `directed-agent/directed.md`, `directed-agent/research-worker.md`) are never edited; `collect.ps1` rebuilds them from their sources.
 - Skills are directories: `.claude/skills/<name>/SKILL.md`, where the directory name is the slash command. A skill's `description` frontmatter is what Claude reads to decide whether to use it; without one it sees only the first paragraph.
 - Secrets are DPAPI-encrypted per machine at `.claude/.<name>.enc` and never sync. Read them only through `{{CONFIG_ROOT}}/Get-Secret.ps1`, so there is one decrypt path rather than a private copy in each caller.
 
@@ -21,7 +21,7 @@ notes live in `{{DESKTOP}}/CLAUDE.md`; how the config is synced is in `{{CONFIG_
 ## MCP
 - Tool Search is on via the `ENABLE_TOOL_SEARCH=true` User env var, which `deploy.ps1` sets, so MCP tool definitions load lazily and cost no context until used. Exception: `claude-or` drops the variable for its session — deferred tools are Anthropic-only, and non-Anthropic models 400 on them — so OpenRouter sessions load every tool definition eagerly and pay the context cost.
 - `/mcp` toggles servers in-session without restarting; `@` browses MCP resources; `claude mcp list` shows what is connected. Add servers with `claude mcp add --transport http <name> <url>`, run outside a session.
-- Subagents inherit the parent session's MCP tools. Background subagents cannot use them at all.
+- Subagents — foreground or background — inherit every MCP tool the session has (verified on 2.1.250).
 
 ## Windows notes
 - **Never** pass PowerShell containing `$variables`, `$null` or nested quotes inline via `powershell.exe -Command "..."` from bash — both shells fight over `$`. Write a temp `.ps1`, run it with `-ExecutionPolicy Bypass -File`, delete it. Inline `-Command` is fine only when there is no `$`.

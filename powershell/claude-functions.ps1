@@ -48,7 +48,18 @@ if (-not $env:GITHUB_PERSONAL_ACCESS_TOKEN -and (Test-Path "$env:USERPROFILE\.cl
     $env:GITHUB_PERSONAL_ACCESS_TOKEN = & (Get-ClaudeConfigPath "Get-Secret.ps1") -Name github-token
 }
 
+# The directed and research-worker agents are "System Prompt.txt" wearing frontmatter,
+# built into ~/.claude/agents by refresh-directed-agent.ps1 (deployed beside this file).
+# It runs here, BEFORE the launch: Claude Code reads agent definitions before its
+# SessionStart hooks fire (verified on 2.1.250), so the hook alone leaves the first
+# session after a prompt edit one build behind. Silent when nothing changed.
+function Update-DirectedAgents {
+    $refresh = Join-Path $script:ClaudeFnDir 'refresh-directed-agent.ps1'
+    if (Test-Path $refresh) { & $refresh }
+}
+
 function claude-sp {
+    Update-DirectedAgents
     claude --system-prompt-file (Get-ClaudeConfigPath "System Prompt.txt") @args
 }
 
@@ -71,6 +82,7 @@ function Get-OpenRouterKey {
 }
 
 function claude-or {
+    Update-DirectedAgents
     $key = Get-OpenRouterKey
     if ([string]::IsNullOrWhiteSpace($key)) {
         Write-Error "No OpenRouter key. Create it with: Set-Secret.ps1 -Name openrouter-key"

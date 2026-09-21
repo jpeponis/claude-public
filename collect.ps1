@@ -64,9 +64,9 @@ if (-not $Force -and (Test-Path $lastDeployedPath)) {
             $repoHas   = Test-Path $repoPath
             $localHas  = Test-Path $c.LocalPath
             if ($repoHas -and $localHas) {
-                $expected = Expand-Tokens -Text (Get-Content $repoPath -Raw -Encoding UTF8) `
+                $expected = Expand-Tokens -Text (Read-TextFile $repoPath) `
                                           -UserName $username -ConfigRoot $configRoot -Desktop $desktopTok
-                if ((Get-Content $c.LocalPath -Raw -Encoding UTF8) -ne $expected) {
+                if ((Read-TextFile $c.LocalPath) -ne $expected) {
                     $conflicts += "$($c.RepoPath) (repo and installed copies both changed)"
                 }
             } elseif ($repoHas) {
@@ -225,8 +225,11 @@ function Copy-Parameterized {
 # a shared skill deleted locally (and therefore from shared\skills below) must still
 # be excluded from claude-skills in the same run, not re-collected there.
 $memberIndex = @{}
-foreach ($dir in $manifest.Dirs) {
-    $memberIndex[$dir.Id] = @(Get-ArtifactMembers -RepoRoot $repoRoot -Artifact $dir)
+# Files too, not only Dirs: an ExcludeMembersOf may name a file artifact (the generated
+# directed agent, deployed into the same directory claude-agents collects from), and its
+# one member is its own filename.
+foreach ($owner in (@($manifest.Dirs) + @($manifest.Files))) {
+    $memberIndex[$owner.Id] = @(Get-ArtifactMembers -RepoRoot $repoRoot -Artifact $owner)
 }
 
 # Process individual files. Repository-authoritative artifacts are never collected --
