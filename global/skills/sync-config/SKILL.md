@@ -33,19 +33,19 @@ The script is `sync-config.ps1` in the config repo. Always quote `"$HOME/..."` i
 ### Pull (default)
 Run:
 ```
-powershell.exe -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" pull
+powershell.exe -NonInteractive -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" pull
 ```
 Report output to the user. Remind them to restart Claude Code if settings changed.
 
 ### Push
 1. Run with `-DryRun` first:
 ```
-powershell.exe -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" push -DryRun
+powershell.exe -NonInteractive -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" push -DryRun
 ```
 2. Show the user what will be committed and **ask for confirmation**.
 3. If confirmed, run without `-DryRun`:
 ```
-powershell.exe -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" push
+powershell.exe -NonInteractive -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" push
 ```
 
 ### Default
@@ -76,7 +76,7 @@ Never pick `-Force` without asking.
   ```powershell
   $log = (New-TemporaryFile).FullName
   for ($i = 1; $i -le 5; $i++) {
-    powershell.exe -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" push *> $log
+    powershell.exe -NonInteractive -ExecutionPolicy Bypass -File "{{CONFIG_ROOT}}/sync-config.ps1" push *> $log
     if (-not (Select-String -Path $log -Pattern 'add_item|could not read Username' -Quiet)) { break }
     Start-Sleep -Seconds 20
   }
