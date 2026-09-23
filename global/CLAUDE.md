@@ -25,6 +25,7 @@ notes live in `{{DESKTOP}}/CLAUDE.md`; how the config is synced is in `{{CONFIG_
 
 ## Windows notes
 - **Never** pass PowerShell containing `$variables`, `$null` or nested quotes inline via `powershell.exe -Command "..."` from bash — both shells fight over `$`. Write a temp `.ps1`, run it with `-ExecutionPolicy Bypass -File`, delete it. Inline `-Command` is fine only when there is no `$`.
+- Add `-NonInteractive` whenever `powershell.exe` is launched from bash. Without it, a missing mandatory parameter, `Read-Host` or a confirmation *prompts* — and with no console to answer, the process hangs until the tool times out; with it, the prompt throws at once with a readable error. The only script here that prompts on purpose is `Set-Secret.ps1`, which you run yourself.
 - Resolve Desktop and Documents with `[Environment]::GetFolderPath(...)`, never `$env:USERPROFILE\Desktop`. OneDrive Known Folder Move redirects both, and the literal path is then either missing or a stale leftover.
 - **claude-in-chrome**: if its tools report "not connected", run `/mcp` — it reconnects in-session. Don't retry more than twice. The fallback that works is `playwright-core` driving the installed Chrome (`chromium.launch({ channel: 'chrome' })`), which downloads no browser.
 - Stop background dev servers (`python -m http.server` and friends) when the work phase ends rather than leaving them running.
