@@ -1,4 +1,4 @@
-# research_worker -- Codex counterpart of global/agents/research-worker.md.
+# research_worker -- Codex counterpart of directed-agent/research-worker.md.
 #
 # Deliberately does NOT duplicate "System Prompt.txt": Codex subagents inherit omitted
 # session settings from the parent, so a codex-sp session already gives workers the
