@@ -10,15 +10,25 @@
 # writes beside this file, falling back to <Desktop>\claude-config (the bootstrap
 # location) when the pointer is absent. Never hardcode the Desktop path in a function:
 # it is wrong the moment the repo lives anywhere else, and the failure is silent.
-
-$script:CodexFnDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$script:CodexConfigRoot = $null
-$codexPointer = Join-Path $script:CodexFnDir '.config-root'
-if (Test-Path $codexPointer) {
-    $script:CodexConfigRoot = (Get-Content $codexPointer -Raw).Trim()
-}
-if (-not $script:CodexConfigRoot -or -not (Test-Path $script:CodexConfigRoot)) {
-    $script:CodexConfigRoot = Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config'
+#
+# $global:, not $script:. The profile runs in the global scope, so $script: worked at
+# the prompt -- but a function resolves $script: in its CALLER's script scope, which
+# inside any .ps1 is that script's own, empty one, and codex-sp failed with "Prompt file
+# not found". The try/catch is because this runs at every shell start: a throw here (an
+# empty or unreadable pointer, say) would abort the rest of the profile.
+$global:CodexFnDir = $null
+$global:CodexConfigRoot = $null
+try {
+    $global:CodexFnDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $codexPointer = Join-Path $global:CodexFnDir '.config-root'
+    if (Test-Path -LiteralPath $codexPointer) {
+        $global:CodexConfigRoot = "$(Get-Content -LiteralPath $codexPointer -Raw)".Trim()
+    }
+    if (-not $global:CodexConfigRoot -or -not (Test-Path -LiteralPath $global:CodexConfigRoot)) {
+        $global:CodexConfigRoot = Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config'
+    }
+} catch {
+    Write-Warning "codex-functions.ps1: could not resolve the config repo: $($_.Exception.Message)"
 }
 
 # codex-sp: Codex with the repo's custom prompt REPLACING the built-in instructions,
@@ -39,7 +49,7 @@ if (-not $script:CodexConfigRoot -or -not (Test-Path $script:CodexConfigRoot)) {
 # (agents/queue/migrate-rollouts were unknown to it). Strict validation of the profile
 # is doctor.ps1's job, once per version -- not this function's job on every launch.
 function codex-sp {
-    $promptPath = Join-Path $script:CodexConfigRoot 'System Prompt.txt'
+    $promptPath = Join-Path $global:CodexConfigRoot 'System Prompt.txt'
 
     if (-not (Test-Path -LiteralPath $promptPath -PathType Leaf)) {
         Write-Error "Prompt file not found: $promptPath"

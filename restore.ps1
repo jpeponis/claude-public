@@ -157,7 +157,8 @@ foreach ($f in $entries) {
     }
 
     $content = [System.IO.File]::ReadAllText($src)
-    $unchanged = (Test-Path $f.Dest) -and ([System.IO.File]::ReadAllText($f.Dest) -eq $content)
+    # -ceq: -eq ignores case, and a backup differing only in case was skipped as [SAME].
+    $unchanged = (Test-Path $f.Dest) -and ([System.IO.File]::ReadAllText($f.Dest) -ceq $content)
 
     if ($unchanged) {
         Say "[SAME] $($f.Label)" 'DarkGray'

@@ -1,17 +1,29 @@
 # User-level instructions
 
-Deployed to `~/.claude/CLAUDE.md`, so Claude reads this wherever a session starts. Desktop-scoped
-notes live in `{{DESKTOP}}/CLAUDE.md`; how the config is synced is in `{{CONFIG_ROOT}}/README.md`.
+True wherever a session starts: deployed to `~/.claude/CLAUDE.md` for Claude, and built into
+`~/.codex/AGENTS.md` for Codex. Desktop-scoped notes live in `{{DESKTOP}}/CLAUDE.md` (and the
+`AGENTS.md` beside it); how the config is synced is in `{{CONFIG_ROOT}}/README.md`.
 
+<!-- Sections between claude-only markers are stripped from the generated Codex
+     AGENTS.md files. Unmarked content is shared with Codex: keep it host-neutral,
+     and mark anything Claude-specific you add. -->
+
+<!-- claude-only -->
 ## Agent usage
+- Delegate to the `directed` agent, not `general-purpose`, whenever no more specific agent fits. Its body is `System Prompt.txt` — the same rules this session runs under — where general-purpose carries the built-in boilerplate. Pass a per-call `model`; it inherits every tool and MCP server.
 - Delegate bulk or multi-file operations (organize, mass move/copy/rename/delete) to the file-manager agent. Trivial single-file operations may be done inline.
 - Before dispatching any file-manager task, verify the destination path exists (a one-second `ls` beats a 45-second agent round-trip that bounces back with a question).
+<!-- /claude-only -->
 
 ## Config layout
-- Settings, skills, agents and shell functions live under `$env:USERPROFILE\.claude\`, deployed there from `{{CONFIG_ROOT}}`. **Edit the deployed copy, then `/sync-config push`.** Push collects deployed → repo, so a repo edit made by hand is overwritten by the next push, and a deployed edit you never push is overwritten by the next pull or `deploy.ps1` — so edit deployed, and push promptly. Exceptions, edited in the repo: `System Prompt.txt`, the `directed-agent/*.head.md` fragments, and the scripts themselves. The generated files (`codex/AGENTS.md`, `directed-agent/directed.md`, `directed-agent/research-worker.md`) are never edited; `collect.ps1` rebuilds them from their sources.
+- Settings, skills, agents and shell functions live under `$env:USERPROFILE\.claude\` (Codex's under `$env:USERPROFILE\.codex\` and `$env:USERPROFILE\.agents\skills\`), deployed there from `{{CONFIG_ROOT}}`. **Edit the deployed copy, then push it with `{{CONFIG_ROOT}}/sync-config.ps1 push`.** Push collects deployed → repo, so a repo edit made by hand is overwritten by the next push, and a deployed edit you never push is overwritten by the next pull or `deploy.ps1` — so edit deployed, and push promptly. Exceptions, edited in the repo: `System Prompt.txt`, the `directed-agent/*.head.md` fragments, and the scripts themselves. The generated files (`codex/AGENTS.md`, `directed-agent/directed.md`, `directed-agent/research-worker.md`) are never edited; `collect.ps1` rebuilds them from their sources.
+<!-- claude-only -->
+- In Claude Code, `/sync-config push` does the same push.
+<!-- /claude-only -->
 - Skills are directories: `.claude/skills/<name>/SKILL.md`, where the directory name is the slash command. A skill's `description` frontmatter is what Claude reads to decide whether to use it; without one it sees only the first paragraph.
 - Secrets are DPAPI-encrypted per machine at `.claude/.<name>.enc` and never sync. Read them only through `{{CONFIG_ROOT}}/Get-Secret.ps1`, so there is one decrypt path rather than a private copy in each caller.
 
+<!-- claude-only -->
 ## Billing modes
 - **Default (subscription)**: no `ANTHROPIC_API_KEY` set, 200K context.
 - **OpenRouter mode**: `claude-or`, `claude-or-sp`, `claude-or-spsp` route the whole session through OpenRouter's Anthropic-compatible endpoint (`ANTHROPIC_BASE_URL=https://openrouter.ai/api`, auth token from the `openrouter-key` secret) with gateway model discovery on, so `/model` lists the OpenRouter catalog. Everything in such a session — Claude models included — bills the OpenRouter key; the subscription sits idle there.
@@ -22,10 +34,13 @@ notes live in `{{DESKTOP}}/CLAUDE.md`; how the config is synced is in `{{CONFIG_
 - Tool Search is on via the `ENABLE_TOOL_SEARCH=true` User env var, which `deploy.ps1` sets, so MCP tool definitions load lazily and cost no context until used. Exception: `claude-or` drops the variable for its session — deferred tools are Anthropic-only, and non-Anthropic models 400 on them — so OpenRouter sessions load every tool definition eagerly and pay the context cost.
 - `/mcp` toggles servers in-session without restarting; `@` browses MCP resources; `claude mcp list` shows what is connected. Add servers with `claude mcp add --transport http <name> <url>`, run outside a session.
 - Subagents — foreground or background — inherit every MCP tool the session has (verified on 2.1.250).
+<!-- /claude-only -->
 
 ## Windows notes
 - **Never** pass PowerShell containing `$variables`, `$null` or nested quotes inline via `powershell.exe -Command "..."` from bash — both shells fight over `$`. Write a temp `.ps1`, run it with `-ExecutionPolicy Bypass -File`, delete it. Inline `-Command` is fine only when there is no `$`.
 - Add `-NonInteractive` whenever `powershell.exe` is launched from bash. Without it, a missing mandatory parameter, `Read-Host` or a confirmation *prompts* — and with no console to answer, the process hangs until the tool times out; with it, the prompt throws at once with a readable error. The only script here that prompts on purpose is `Set-Secret.ps1`, which you run yourself.
 - Resolve Desktop and Documents with `[Environment]::GetFolderPath(...)`, never `$env:USERPROFILE\Desktop`. Whether they are redirected varies by machine: where OneDrive Known Folder Move is on, it moves both, and the literal path is then either missing or a stale leftover; where it is off, the call simply returns the literal path. Never assume OneDrive is present.
+<!-- claude-only -->
 - **claude-in-chrome**: if its tools report "not connected", run `/mcp` — it reconnects in-session. Don't retry more than twice. The fallback that works is `playwright-core` driving the installed Chrome (`chromium.launch({ channel: 'chrome' })`), which downloads no browser.
+<!-- /claude-only -->
 - Stop background dev servers (`python -m http.server` and friends) when the work phase ends rather than leaving them running.

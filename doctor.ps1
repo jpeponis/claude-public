@@ -54,6 +54,42 @@ function Get-ExeVersion {
     try { return (& $cmd.Source @VersionArgs 2>&1 | Select-Object -First 1) } catch { return $null }
 }
 
+# Strict JSON, the way Claude Code reads its settings files. Common.ps1's Test-JsonValid
+# is deliberately lenient (comments, trailing commas) because Windows Terminal's
+# settings are JSONC; a settings.json that passes only that test is one Claude Code
+# rejects. Default JsonDocumentOptions disallow both. ConvertFrom-Json is not a
+# substitute on PowerShell 7, which accepts trailing commas; on 5.1, where
+# System.Text.Json does not exist, it is strict about both, so it is the fallback.
+function Test-StrictJson {
+    param([string]$Json)
+    if ([string]::IsNullOrWhiteSpace($Json)) { return $false }
+    try {
+        if ('System.Text.Json.JsonDocument' -as [type]) {
+            ([System.Text.Json.JsonDocument]::Parse($Json, [System.Text.Json.JsonDocumentOptions]::new())).Dispose()
+        } else {
+            [void]($Json | ConvertFrom-Json)
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# One Claude Code settings file: present and strict JSON. $true when it passes; a
+# failure has already been reported.
+function Test-SettingsFile {
+    param([string]$Path, [ValidateSet('WARN', 'FAIL')][string]$IfMissing)
+    if (-not (Test-Path -LiteralPath $Path)) { Check $IfMissing "missing $Path" "run deploy.ps1"; return $false }
+    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    if (Test-StrictJson $raw) { return $true }
+    if (Test-JsonValid $raw) {
+        Check FAIL "$Path has comments or trailing commas -- fine as JSONC, but Claude Code requires strict JSON" "remove them"
+    } else {
+        Check FAIL "$Path is not valid JSON" "restore.ps1 -Latest, or re-run deploy.ps1"
+    }
+    return $false
+}
+
 Write-Host "=== Claude Code config doctor ===" -ForegroundColor White
 Write-Host "repo: $repoRoot" -ForegroundColor DarkGray
 
@@ -62,38 +98,27 @@ Section "Toolchain"
 
 $claudeVer = Get-ExeVersion 'claude'
 if ($claudeVer) { Check OK "claude on PATH -- $claudeVer" }
-else { Check FAIL "claude not found on PATH" "npm install -g @anthropic-ai/claude-code" }
+else { Check FAIL "claude not found on PATH" "irm https://claude.ai/install.ps1 | iex   (or: winget install Anthropic.ClaudeCode)" }
 
+# Claude Code here is the native install, which needs no Node. Node matters only to
+# npm-installed tools -- Codex CLI's npm launcher is a Node script -- so its absence
+# is worth knowing, not a failure.
 $nodeVer = Get-ExeVersion 'node'
-if (-not $nodeVer) {
-    Check FAIL "node not found on PATH" "Install Node.js 22 or newer"
-} else {
-    $major = 0
-    if ($nodeVer -match 'v(\d+)\.') { $major = [int]$Matches[1] }
-    if ($major -ge 22) { Check OK "node $nodeVer (>= 22 required)" }
-    else { Check FAIL "node $nodeVer is older than the required v22" "Install Node.js 22 or newer" }
-}
+if ($nodeVer) { Check OK "node $nodeVer on PATH (used by npm-installed tools such as Codex CLI)" }
+else { Check WARN "node not found on PATH -- only needed for npm-installed tools such as Codex CLI" "winget install OpenJS.NodeJS.LTS" }
 
 # --- Settings ---------------------------------------------------------------
 Section "Settings"
 
 $globalSettings = Join-Path $claudeHome "settings.json"
-if (-not (Test-Path $globalSettings)) {
-    Check FAIL "missing $globalSettings" "run deploy.ps1"
-} elseif (-not (Test-JsonValid (Get-Content $globalSettings -Raw -Encoding UTF8))) {
-    Check FAIL "$globalSettings is not valid JSON" "restore.ps1 -Latest, or re-run deploy.ps1"
-} else {
+if (Test-SettingsFile -Path $globalSettings -IfMissing FAIL) {
     $s = Get-Content $globalSettings -Raw -Encoding UTF8 | ConvertFrom-Json
-    Check OK "global settings.json parses (model=$($s.model), effortLevel=$($s.effortLevel))"
+    Check OK "global settings.json parses as strict JSON (model=$($s.model), effortLevel=$($s.effortLevel))"
 }
 
 $localSettings = Join-Path $desktopDir ".claude\settings.local.json"
-if (-not (Test-Path $localSettings)) {
-    Check WARN "missing $localSettings" "run deploy.ps1"
-} elseif (-not (Test-JsonValid (Get-Content $localSettings -Raw -Encoding UTF8))) {
-    Check FAIL "$localSettings is not valid JSON" "restore.ps1 -Latest, or re-run deploy.ps1"
-} else {
-    Check OK "project settings.local.json parses"
+if (Test-SettingsFile -Path $localSettings -IfMissing WARN) {
+    Check OK "project settings.local.json parses as strict JSON"
 }
 
 # --- Deployed content vs what the repo ships --------------------------------
@@ -106,6 +131,29 @@ if (-not (Test-Path $localSettings)) {
 # going missing is precisely the failure a single-destination check cannot see.
 Section "Deployed content"
 
+# Top-level entries in a destination directory that NO artifact owns: not a member of
+# any dir artifact deploying there, not a file artifact's target, not another
+# program's ForeignMembers. Counted per entry because a skill is a directory -- the
+# file count used to report Claude Code's own 'synced' cache as 240-odd "unmanaged"
+# files, which buried the one or two skills that really are the user's own.
+function Get-UnmanagedEntries {
+    param([string]$DestRoot, $Set)
+    if (-not (Test-Path -LiteralPath $DestRoot)) { return @() }
+    $owned = @()
+    foreach ($d in @($plan.Dirs | Where-Object { $DestRoot -in @($_.Destinations) })) {
+        $owned += @(Get-ArtifactMembers -RepoRoot $repoRoot -Artifact $d)
+        $owned += @($d.ForeignMembers | Where-Object { $_ })
+    }
+    foreach ($f in $plan.Files) {
+        foreach ($dest in @($f.Destinations)) {
+            if ((Split-Path -Parent $dest) -eq $DestRoot) { $owned += (Split-Path -Leaf $dest) }
+        }
+    }
+    $entries = if ($Set.Recurse) { Get-ChildItem -LiteralPath $DestRoot }
+               else { Get-ChildItem -LiteralPath $DestRoot -Filter $Set.Filter -File }
+    return @($entries | Where-Object { $_.Name -notin $owned } | ForEach-Object Name)
+}
+
 foreach ($set in $plan.Dirs) {
     $repoDir = Join-Path $repoRoot $set.Repo
     $repoNames = @(Get-PlanFiles -Root $repoDir -Filter $set.Filter -Recurse $set.Recurse | ForEach-Object RelPath)
@@ -116,11 +164,12 @@ foreach ($set in $plan.Dirs) {
         continue
     }
 
+    $unit = if ($set.Repo -like '*skills') { 'skill(s)' } else { 'file(s)' }
     foreach ($destRoot in @($set.Destinations)) {
         $localNames = @(Get-PlanFiles -Root $destRoot -Filter $set.Filter -Recurse $set.Recurse | ForEach-Object RelPath)
         $missing = @($repoNames | Where-Object { $_ -notin $localNames })
-        $extra   = @($localNames | Where-Object { $_ -notin $repoNames })
-        $extraNote = if ($extra.Count) { " (+$($extra.Count) unmanaged, left alone)" } else { "" }
+        $extra   = @(Get-UnmanagedEntries -DestRoot $destRoot -Set $set)
+        $extraNote = if ($extra.Count) { " (+$($extra.Count) unmanaged $unit, left alone: $($extra -join ', '))" } else { "" }
 
         if ($missing.Count -eq 0) {
             Check OK "$($set.Name) -> $destRoot`: $($repoNames.Count)/$($repoNames.Count) deployed$extraNote"
@@ -129,6 +178,27 @@ foreach ($set in $plan.Dirs) {
         }
     }
 }
+
+# Single-file artifacts (memory files, settings, generated agents and AGENTS.md, the
+# launchers), at every destination. The dir loop above never saw these, so a deployed
+# CLAUDE.md or AGENTS.md could vanish while every line stayed green.
+$fileDests = 0
+$fileMissing = 0
+foreach ($map in $plan.Files) {
+    if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $map.Repo))) {
+        $fileMissing++
+        Check FAIL "$($map.Id): the repo has no $($map.Repo), so deploy has nothing to install" "restore it in the repo, or remove the artifact from Get-ArtifactManifest"
+        continue
+    }
+    foreach ($dest in @($map.Destinations)) {
+        $fileDests++
+        if (-not (Test-Path -LiteralPath $dest)) {
+            $fileMissing++
+            Check FAIL "$($map.Id) -> $dest`: missing" "run deploy.ps1"
+        }
+    }
+}
+if ($fileMissing -eq 0) { Check OK "single-file artifacts: $fileDests/$fileDests destinations present" }
 
 # --- Does the deployed copy still MATCH the repo? ---------------------------
 # Presence was never the whole question. Editing a deployed file directly is the
@@ -155,11 +225,12 @@ foreach ($set in $plan.Dirs) {
     }
 }
 
+# Ordinal: PowerShell's -ne ignores case, so a case-only edit used to count as a match.
 foreach ($p in $deployedPairs) {
     if (-not (Test-Path $p.Repo) -or -not (Test-Path $p.Local)) { continue }   # absence reported above
     $expected = Expand-Tokens -Text (Read-TextFile $p.Repo) `
                               -UserName $env:USERNAME -ConfigRoot $configRoot -Desktop $desktopTok
-    if ((Read-TextFile $p.Local) -ne $expected) { $drifted += $p.Label }
+    if (-not [string]::Equals((Read-TextFile $p.Local), $expected, [StringComparison]::Ordinal)) { $drifted += $p.Label }
 }
 
 if ($drifted.Count -eq 0) {
@@ -200,21 +271,68 @@ $fnPath = Join-Path $claudeHome "claude-functions.ps1"
 if (Test-Path $fnPath) { Check OK "claude-functions.ps1 deployed to ~/.claude/" }
 else { Check FAIL "missing $fnPath" "run deploy.ps1" }
 
+# The block's BODY is compared, not just its start marker: a block missing a line, or
+# with its dot-source commented out, starts the same way and wires nothing. Line
+# endings are normalized because deploy writes CRLF around the block and an editor
+# may not. Returns 'current', 'differs', 'unterminated' (start marker, no end) or 'missing'.
+function Get-ProfileBlockState {
+    param([string]$Path)
+    if (-not (Test-ClaudeProfileBlock -Path $Path)) { return 'missing' }
+    $m = Get-ClaudeBlockMarkers
+    $found = [regex]::Match((Read-TextFile $Path), "(?s)" + $m.DetectPattern + ".*?" + [regex]::Escape($m.End))
+    if (-not $found.Success) { return 'unterminated' }
+    $expected = (Get-ClaudeProfileBlock).Replace("`r`n", "`n").Trim()
+    if ([string]::Equals($found.Value.Replace("`r`n", "`n").Trim(), $expected, [StringComparison]::Ordinal)) { return 'current' }
+    return 'differs'
+}
+
+# Launcher code OUTSIDE the managed block: hand-written claude-*/codex-* functions, or a
+# token export, from before the block existed. The block redefines the launchers, so the
+# profile reads as wired while the old lines still run at every shell start -- exporting
+# a token into every process, and keeping removed launchers callable. Returns the line
+# numbers (comment lines are skipped for the mention test); the block itself is skipped
+# only when both of its markers are present.
+function Get-ProfileLegacyLines {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    $m = Get-ClaudeBlockMarkers
+    $lines = @((Read-TextFile $Path) -split "\r?\n")
+    $start = -1; $end = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($start -lt 0 -and $lines[$i] -match $m.DetectPattern) { $start = $i }
+        elseif ($start -ge 0 -and $lines[$i].Contains($m.End)) { $end = $i; break }
+    }
+    $hits = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($end -ge 0 -and $i -ge $start -and $i -le $end) { continue }
+        $line = $lines[$i]
+        if ($line -match '(?i)^\s*function\s+(global:|script:)?(claude-[\w-]*|codex-[\w-]*|Get-AnthropicApiKey)\b' -or
+            ($line -notmatch '^\s*#' -and $line -match '(?i)GITHUB_PERSONAL_ACCESS_TOKEN|Get-Secret\.ps1')) { $hits += ($i + 1) }
+    }
+    return $hits
+}
+
 $profilePaths = @(Get-ProfilePaths)
 $wired = @()
 $unwired = @()
+$wiredEditions = @()
 foreach ($p in $profilePaths) {
     $edition = switch -Wildcard ($p) {
         '*\WindowsPowerShell\*' { 'Windows PowerShell 5.1' }
         '*\PowerShell\*'        { 'PowerShell 7+' }
         default                 { 'PowerShell' }
     }
-    if (Test-ClaudeProfileBlock -Path $p) {
-        $wired += $p
-        Check OK "$edition profile sources claude-functions.ps1"
-    } else {
-        $unwired += $p
-        Check FAIL "$edition profile is missing the managed block -- $p" "run deploy.ps1"
+    $state = Get-ProfileBlockState -Path $p
+    if ($state -eq 'current') { $wired += $p; $wiredEditions += $edition } else { $unwired += $p }
+    switch ($state) {
+        'current'      { Check OK "$edition profile sources claude-functions.ps1" }
+        'differs'      { Check FAIL "$edition profile's managed block differs from the one deploy writes (edited, stale, or missing a line) -- $p" "run deploy.ps1, which replaces the block in place" }
+        'unterminated' { Check FAIL "$edition profile has the managed block's start marker but not its end marker -- $p" "delete the damaged block by hand, then run deploy.ps1" }
+        'missing'      { Check FAIL "$edition profile is missing the managed block -- $p" "run deploy.ps1" }
+    }
+    $legacy = @(Get-ProfileLegacyLines -Path $p)
+    if ($legacy.Count) {
+        Check WARN "$edition profile defines launchers or reads secrets OUTSIDE the managed block -- $p, line(s) $($legacy -join ', ')" "these predate the managed block and still run at every shell start; delete them by hand -- deploy never edits outside its block"
     }
 }
 
@@ -224,11 +342,103 @@ if ($profilePaths.Count -eq 0) {
     Check OK "every discovered profile is wired -- the functions exist in whichever shell you open"
 }
 
+# A wired profile still does nothing if the edition's execution policy refuses to run
+# it -- and Windows PowerShell 5.1's default on a Windows client is Restricted. Each
+# edition is asked in that edition, because the two keep separate policies. The
+# Process scope is ignored: this script runs under -ExecutionPolicy Bypass, and
+# PSExecutionPolicyPreference is often inherited from the launching shell, so the
+# child's own effective policy reflects how doctor was started, not how a terminal
+# the user opens will behave. A PSExecutionPolicyPreference set persistently (User or
+# Machine environment) is different -- every new shell inherits it -- so it stands in
+# for the Process scope.
+#
+# Get-ExecutionPolicy -List from that edition, as Scope -> policy name; @{} if unreadable.
+function Get-EditionPolicyScopes {
+    param([string]$Exe)
+    $query = 'Get-ExecutionPolicy -List | ForEach-Object { "{0}={1}" -f $_.Scope, $_.ExecutionPolicy }'
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($query))
+    $scopes = @{}
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        foreach ($line in @(& $Exe -NoProfile -NonInteractive -EncodedCommand $encoded 2>$null)) {
+            if ("$line" -match '^(\w+)=(\w+)$') { $scopes[$Matches[1]] = $Matches[2] }
+        }
+    } catch { }
+    finally { $ErrorActionPreference = $previousEap }
+    return $scopes
+}
+
+# The policy a freshly opened shell of that edition runs under, and the scope that set it.
+function Resolve-ProfilePolicy {
+    param([hashtable]$Scopes, [string]$Default, [string]$PersistentProcess)
+    $s = @{} + $Scopes
+    $s.Remove('Process')
+    if ($PersistentProcess) { $s['Process'] = $PersistentProcess }
+    foreach ($scope in @('MachinePolicy', 'UserPolicy', 'Process', 'CurrentUser', 'LocalMachine')) {
+        if ($s[$scope] -and $s[$scope] -ne 'Undefined') { return @{ Policy = $s[$scope]; From = $scope } }
+    }
+    return @{ Policy = $Default; From = 'default, every scope Undefined' }
+}
+
+$persistentProcessPolicy = @('User', 'Machine' | ForEach-Object {
+    [Environment]::GetEnvironmentVariable('PSExecutionPolicyPreference', $_) } | Where-Object { $_ })[0]
+$editionShells = @{
+    'Windows PowerShell 5.1' = @{ Exe = 'powershell.exe'; Default = 'Restricted' }
+    'PowerShell 7+'          = @{ Exe = 'pwsh';           Default = 'RemoteSigned' }
+}
+foreach ($edition in @($wiredEditions | Select-Object -Unique | Where-Object { $editionShells.ContainsKey($_) })) {
+    $shell = $editionShells[$edition]
+    $exe = Get-Command $shell.Exe -ErrorAction SilentlyContinue
+    if (-not $exe) { continue }    # profile wired for an edition not installed here
+    $scopes = Get-EditionPolicyScopes -Exe $exe.Source
+    if ($scopes.Count -eq 0) {
+        Check WARN "could not read the $edition execution policy" "run Get-ExecutionPolicy -List in $edition"
+        continue
+    }
+    $r = Resolve-ProfilePolicy -Scopes $scopes -Default $shell.Default -PersistentProcess $persistentProcessPolicy
+    if ($r.Policy -in @('Restricted', 'AllSigned')) {
+        $fix = switch ($r.From) {
+            { $_ -in @('MachinePolicy', 'UserPolicy') } { "set by Group Policy ($($r.From)), which Set-ExecutionPolicy cannot override -- ask whoever manages this machine"; break }
+            'Process' { "the persistent PSExecutionPolicyPreference environment variable sets it -- remove it, or set it to RemoteSigned"; break }
+            default   { "in $edition`: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned" }
+        }
+        Check FAIL "$edition execution policy is $($r.Policy) ($($r.From)) -- its profile never runs, so the claude-*/codex-* functions do not exist there" $fix
+    } else {
+        Check OK "$edition execution policy is $($r.Policy) ($($r.From)) -- the profile runs"
+    }
+}
+
+# Which shell Terminal opens matters only if it is one of the wired editions: a default
+# of Command Prompt, WSL or a VS developer shell never loads these profiles at all.
+# Judged by what the profile launches -- commandline, or the dynamic-profile source
+# Terminal generates for PowerShell 7 -- not by its display name, which is the user's.
+function Get-TerminalProfileEdition {
+    param([string]$SettingsPath, [string]$Guid)
+    try {
+        $raw = (Get-Content -LiteralPath $SettingsPath -Raw -Encoding UTF8) -replace '(?m)^\s*//.*$', ''
+        $termProfile = @(($raw | ConvertFrom-Json).profiles.list |
+            Where-Object { $_.guid -eq $Guid -or $_.name -eq $Guid })[0]
+    } catch { return $null }
+    if (-not $termProfile) { return $null }
+    $cmd = [string]$termProfile.commandline
+    if ($termProfile.source -eq 'Windows.Terminal.PowershellCore' -or
+        $cmd -match '(?i)(^|[\\/"\s])pwsh(\.exe)?("|\s|$)') { return 'PowerShell 7+' }
+    if ($cmd -match '(?i)(^|[\\/"\s])powershell(\.exe)?("|\s|$)') { return 'Windows PowerShell 5.1' }
+    return $null
+}
+
 $term = Get-TerminalDefaultProfile
 if ($term) {
+    $termEdition = Get-TerminalProfileEdition -SettingsPath $term.Path -Guid $term.DefaultProfileGuid
     $note = "Windows Terminal opens '$($term.DefaultProfileName)' by default"
-    if ($unwired.Count -eq 0) { Check OK $note }
-    else { Check WARN "$note -- confirm that shell is one of the wired profiles above" "run deploy.ps1" }
+    if (-not $termEdition) {
+        Check WARN "$note, which is not Windows PowerShell or PowerShell 7 -- the claude-*/codex-* functions are not defined there" "Terminal > Settings > Startup > Default profile: pick Windows PowerShell or PowerShell"
+    } elseif ($termEdition -in $wiredEditions) {
+        Check OK "$note ($termEdition, wired above)"
+    } else {
+        Check WARN "$note ($termEdition), whose profile is not wired" "run deploy.ps1"
+    }
 }
 
 # --- Windows Terminal Shift+Enter ------------------------------------------
@@ -251,6 +461,26 @@ if ($wtPaths.Count -eq 0) {
 # --- Secrets (optional, per-machine, never synced) --------------------------
 Section "Secrets (per-machine, never synced)"
 
+# Whether a stored secret decrypts, asked of Get-Secret.ps1 itself: $null when it does,
+# else Get-Secret's own one-line reason, which becomes the FAIL text. The value is never
+# returned. That line is written with [Console]::Error, which no PowerShell redirection
+# catches in-process -- 2>$null let it through onto the report -- so the console's error
+# writer is swapped out for the length of the call.
+function Get-SecretFailure {
+    param([string]$Name)
+    $value = $null
+    $captured = [System.IO.StringWriter]::new()
+    $consoleError = [Console]::Error
+    [Console]::SetError($captured)
+    try { $value = & (Join-Path $repoRoot 'Get-Secret.ps1') -Name $Name 2>$null }
+    catch { $captured.WriteLine($_.Exception.Message) }
+    finally { [Console]::SetError($consoleError) }
+    if (-not [string]::IsNullOrWhiteSpace($value)) { return $null }
+    $reason = @($captured.ToString() -split "\r?\n" | Where-Object { $_.Trim() })[0]
+    if ($reason) { return $reason.Trim() }
+    return 'Get-Secret.ps1 printed nothing'
+}
+
 $registry = $null
 try { $registry = Get-SecretsRegistry -RepoRoot $repoRoot }
 catch { Check FAIL "secrets.json is not valid JSON -- $($_.Exception.Message)" }
@@ -262,16 +492,27 @@ if ($null -eq $registry) {
     # different Windows user or machine, sits there looking fine and fails at the
     # moment something needs it -- which is a launcher failing, not a warning. So
     # decrypt each one for real and report what actually happens.
+    #
+    # A secret registered for a plugin (its 'plugin' field) is needed only while that
+    # plugin is enabled in settings.json. Only an explicit $false skips one: if the
+    # applicability test fails or answers anything else, the secret is checked anyway,
+    # because reporting one too many beats hiding one.
+    $settingsForSecrets = Join-Path $claudeHome 'settings.json'
     foreach ($sec in $registry) {
+        $applies = $null
+        try { $applies = Test-SecretApplies -Secret $sec -SettingsPath $settingsForSecrets } catch { }
+        if ($applies -is [bool] -and -not $applies) {
+            Write-Host "  [ -- ] $($sec.name) not needed -- plugin $($sec.plugin) is not enabled" -ForegroundColor DarkGray
+            continue
+        }
         $encPath = Join-Path $claudeHome ".$($sec.name).enc"
         if (-not (Test-Path $encPath)) {
             Check WARN "$($sec.name) absent -- $($sec.purpose)" "& `"$repoRoot\Set-Secret.ps1`" -Name $($sec.name)"
             continue
         }
-        $value = $null
-        try { $value = & (Join-Path $repoRoot "Get-Secret.ps1") -Name $sec.name 2>$null } catch { }
-        if ([string]::IsNullOrWhiteSpace($value)) {
-            Check FAIL "$($sec.name) present but cannot be decrypted -- $($sec.purpose)" "re-encrypt it on this machine: & `"$repoRoot\Set-Secret.ps1`" -Name $($sec.name)"
+        $failure = Get-SecretFailure -Name $sec.name
+        if ($failure) {
+            Check FAIL "$($sec.name) present but cannot be decrypted -- $failure" "re-encrypt it on this machine: & `"$repoRoot\Set-Secret.ps1`" -Name $($sec.name)"
         } else {
             Check OK "$($sec.name) present and decrypts"
         }
@@ -456,12 +697,18 @@ if (-not $codexVerLine) {
             Check OK "personal profile loads (codex -p personal debug prompt-input)"
             # Coexistence: the deployed global AGENTS.md must still reach the model's
             # input while the profile is active. Its 'GENERATED from' header line is
-            # stable across content edits, so grep for that. This is the per-upgrade
-            # re-verification: the config reference calls model_instructions_file a
-            # replacement "instead of AGENTS.md", and the coexistence observed today is
-            # a behavior of this version, not a contract.
-            if (Test-Path (Join-Path $codexHome 'AGENTS.md')) {
-                if ($probeOut -match 'GENERATED from') {
+            # stable across content edits, so look for that exact line -- not any
+            # 'GENERATED from', which <Desktop>\AGENTS.md also carries and which
+            # prompt-input includes whenever doctor runs from the Desktop. The probe
+            # prints JSON-escaped text, hence the doubled-backslash form. This is the
+            # per-upgrade re-verification: the config reference calls
+            # model_instructions_file a replacement "instead of AGENTS.md", and the
+            # coexistence observed today is a behavior of this version, not a contract.
+            $globalAgents = Join-Path $codexHome 'AGENTS.md'
+            if (Test-Path $globalAgents) {
+                $agentsHeader = @([System.IO.File]::ReadAllLines($globalAgents) | Where-Object { $_.Trim() })[0]
+                $probeText = "$probeOut"
+                if ($agentsHeader -and ($probeText.Contains($agentsHeader.Trim()) -or $probeText.Contains($agentsHeader.Trim().Replace('\', '\\')))) {
                     Check OK "deployed AGENTS.md reaches the prompt input under the personal profile"
                 } else {
                     Check FAIL "deployed ~/.codex/AGENTS.md does NOT appear in the prompt input" "a Codex update may have changed AGENTS.md discovery; rework the codex-sp launcher, or pin codex to the last version that passed"
@@ -509,6 +756,17 @@ try {
 # 'claude-sp(sp)?\b', not 'claude-sp': the bare form is a substring of the innocent
 # word 'Claude-specific'. Same for claude-or vs 'claude-orchestrated' etc.
 $lintPattern = '(?i)claude-in-chrome|claude-or(-sp)?(sp)?\b|claude-sp(sp)?\b|ANTHROPIC_|OpenRouter|Tool Search|file-manager agent'
+# Slash commands of Claude-only skills (skill sets that deploy only under ~/.claude),
+# taken from the manifest so a new Claude-only skill is linted without editing this.
+# The lookbehind skips path segments such as 'global/skills/<name>/'.
+$claudeOnlySkills = @()
+foreach ($set in @($plan.Dirs | Where-Object { $_.Repo -like '*skills' })) {
+    $outsideClaude = @($set.Destinations | Where-Object { -not $_.StartsWith($claudeHome, [StringComparison]::OrdinalIgnoreCase) })
+    if ($outsideClaude.Count -eq 0) { $claudeOnlySkills += @(Get-ArtifactMembers -RepoRoot $repoRoot -Artifact $set) }
+}
+$slashPattern = if ($claudeOnlySkills.Count) {
+    '(?i)(?<![\w/\\.~}-])/(' + (($claudeOnlySkills | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')(?![\w-])'
+} else { $null }
 # Codex outputs only: the directed agent is Claude's own, and may name Claude tooling freely.
 foreach ($g in @($plan.Files | Where-Object { $_.GeneratedFrom -and $_.Builder -ne 'agent' })) {
     $gp = Join-Path $repoRoot $g.Repo
@@ -517,7 +775,7 @@ foreach ($g in @($plan.Files | Where-Object { $_.GeneratedFrom -and $_.Builder -
     $n = 0
     foreach ($line in [System.IO.File]::ReadAllLines($gp)) {
         $n++
-        if ($line -match $lintPattern) { $hits += $n }
+        if ($line -match $lintPattern -or ($slashPattern -and $line -match $slashPattern)) { $hits += $n }
     }
     if ($hits.Count -eq 0) { Check OK "$($g.Repo) carries no Claude-only vocabulary" }
     else { Check WARN "$($g.Repo) mentions Claude-only tooling on line(s) $($hits -join ', ')" "wrap the source section in claude-only markers if it should not reach Codex" }
@@ -554,12 +812,17 @@ if (Test-Path $publishScript) {
     try { $pubOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $publishScript 2>&1 | Out-String } catch { }
     finally { $ErrorActionPreference = $previousEap }
     $publishCmd = "powershell -ExecutionPolicy Bypass -File `"$publishScript`""
+    # publish.ps1 fetches origin first and says so when it cannot; an offline "in sync"
+    # is only as fresh as the last fetch.
+    $staleNote = if ($pubOut -match 'could not fetch origin') { " (as of the last fetch -- origin unreachable)" } else { "" }
     if ($LASTEXITCODE -eq 0) {
-        Check OK "public repo is in sync with this one"
+        Check OK "public repo is in sync with this one$staleNote"
     } elseif ($pubOut -match 'No git repository at (.+)') {
         Check OK "public clone not present on this machine ($($Matches[1].Trim())) -- publish check skipped"
-    } elseif ($pubOut -cmatch '\[X\] (sensitive term at|PRIVATE-ONLY FILE)') {   # -cmatch: the sweep's section title is 'Sensitive terms'
-        Check FAIL "the public tree contains private content" "run $publishCmd and fix every [X] before anything is pushed"
+    } elseif ($pubOut -cmatch '\[X\] (sensitive term at|sensitive term in commit|forbidden email in commit|PRIVATE-ONLY FILE)') {   # -cmatch: the sweep's section title is 'Sensitive terms'
+        Check FAIL "the public tree or its unpushed commits contain private content" "run $publishCmd and fix every [X] before anything is pushed"
+    } elseif ($pubOut -match 'public clone is (\d+) commit\(s\) behind origin') {
+        Check WARN "the public clone is $($Matches[1]) commit(s) behind origin, so the comparison is against an old tree" "git pull --ff-only in the public clone (run $publishCmd for its path), then re-run doctor"
     } elseif ($pubOut -match '=== (\d+) problem\(s\)') {
         Check WARN "public repo has fallen behind: $($Matches[1]) problem(s)" "run $publishCmd for the list, then -Apply, review and commit in the public clone"
     } else {

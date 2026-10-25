@@ -1,5 +1,5 @@
 # collect.ps1 -- Collect local agent config (Claude + Codex) into the repo with the
-# username parameterized.
+# machine-specific paths parameterized.
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File collect.ps1
 #   powershell -ExecutionPolicy Bypass -File collect.ps1 -Force   # skip the divergence guard
@@ -36,9 +36,10 @@ Test-ArtifactManifest -Manifest $manifest -RepoRoot $repoRoot
 # pull brings down another machine's newer files and this collect would immediately
 # overwrite them with the old installed copies -- git then sees a clean, plausible
 # commit, not a conflict. deploy.ps1 records the commit it deployed in .last-deployed
-# (machine-local, untracked); any managed repo path that changed between that commit
-# and HEAD while ALSO disagreeing with this machine's installed copy is exactly that
-# collision, and collecting through it is data loss.
+# (machine-local, untracked), and sync-config.ps1 advances it after each push it
+# commits; any managed repo path that changed between that commit and HEAD while ALSO
+# disagreeing with this machine's installed copy is exactly that collision, and
+# collecting through it is data loss.
 #
 # The fix the message prescribes is deploy (take the repo's newer version), because
 # that is almost always right. -Force is for the deliberate exception.
@@ -66,7 +67,7 @@ if (-not $Force -and (Test-Path $lastDeployedPath)) {
             if ($repoHas -and $localHas) {
                 $expected = Expand-Tokens -Text (Read-TextFile $repoPath) `
                                           -UserName $username -ConfigRoot $configRoot -Desktop $desktopTok
-                if ((Read-TextFile $c.LocalPath) -ne $expected) {
+                if ((Read-TextFile $c.LocalPath) -cne $expected) {
                     $conflicts += "$($c.RepoPath) (repo and installed copies both changed)"
                 }
             } elseif ($repoHas) {
@@ -102,50 +103,25 @@ $repoOwnedKeys = @(
     @{ File = "global\settings.json"; Key = "model" }
 )
 
-# --- Files that opt out of username parameterization -------------------------
-# The blanket replace below assumes every occurrence of the Windows account name is a
-# local path. That is wrong for one class of file: the GitHub login can be the SAME
-# STRING as the Windows account name while being a different identity. Tokenizing it
-# makes the round trip lossy -- deploy expands the token to whatever the next machine's
-# Windows account is, quietly rewriting 'gh --repo <owner>/site' to point at an owner
-# that does not exist. (publish.ps1 draws the same distinction for the same reason.)
+# --- The account name: a path segment, not a word ----------------------------
+# Only the profile directory in a path -- C:\Users\<name>\ in any slash spelling -- is
+# tokenized (Get-UserPathPattern, lib\Common.ps1). The account name anywhere else is
+# left alone, because there it is somebody's identity: a GitHub login that happens to be
+# the same string, an email address, the person's name in prose. Tokenizing those made
+# the round trip lossy -- deploy expands the token to whatever the next machine's Windows
+# account is, quietly rewriting 'gh --repo <owner>/site' to point at an owner that does
+# not exist, and once (25a2702) turning the owner's name in a skill into the token.
 #
-# The GitHub login is not machine-specific, so it needs no token; it needs to be left
-# alone. A file declares that by carrying this marker anywhere in its text, in whatever
-# comment syntax it already uses:
-#
-#     <!-- sync-config: username-literal -->
-#
-# The marker lives in the file rather than in a list here on purpose: this script is
-# published to the public repo, and a list would have to name private files. It also
-# puts the exemption in front of whoever edits the file next.
-$UserNameLiteralMarker = 'sync-config: username-literal'
-
-# The account name inside a path -- 'Users\<name>' -- is the unambiguous case: a hardcoded
-# local path, which is a portability bug on any machine whether or not privacy is at stake.
-# The bare name on its own is ambiguous; it may be a GitHub owner that has to stay literal.
-# Both checks at the bottom of this script are built from this one pattern so that the
-# per-file guard and the repo-wide sweep cannot drift apart.
-$UserPathPattern = '(?i)users[\\/]' + [regex]::Escape($username)
-
-# An opt-out must not become a way for a real local path to slip through -- an exemption
-# that disables the check as well is just a hole. Marked files skip the replace, then get
-# a stricter test in its place: a path-shaped occurrence is a hard failure.
-function Assert-NoUserPath {
-    param([string]$Content, [string]$Label)
-
-    $m = [regex]::Match($Content, $UserPathPattern)
-    if ($m.Success) {
-        throw "$Label carries the username-literal marker but contains a local path " +
-              "('$($m.Value)'). Rewrite the path with `$HOME, or remove the marker."
-    }
-}
+# This retires the 'sync-config: username-literal' marker. It let a file opt out of the
+# old blanket replace so its GitHub login survived; with only path segments tokenized,
+# every file's login survives and there is nothing left to opt out of. A file still
+# carrying the marker is simply collected like any other. What the marker's check stood
+# for -- a path-shaped occurrence the tokenizer did not take is a hard failure, not a
+# warning -- now applies to every collected file (Assert-NoUserPath, per file) and to the
+# whole repo (the sweep at the bottom), built from the same pattern so they cannot drift.
 
 $collected = 0
 $skipped = 0
-$exempt = @()          # labels, for the report
-$exemptPaths = @()     # repo paths the marker actually governed
-$collectedPaths = @()  # repo paths this run parameterized, and is therefore answerable for
 
 # The value of a single JSON string key, or $null. Text, not ConvertFrom-Json, because
 # the result is spliced straight back into the file below.
@@ -167,7 +143,7 @@ function Restore-RepoOwnedKey {
     if ($null -eq $repoValue) { return $Content }
 
     $localValue = Get-JsonStringValue -Text $Content -Key $Key
-    if ($null -eq $localValue -or $localValue -eq $repoValue) { return $Content }
+    if ($null -eq $localValue -or $localValue -ceq $repoValue) { return $Content }
 
     $m = [regex]::Match($Content, '("' + [regex]::Escape($Key) + '"\s*:\s*)"[^"]*"')
     if (-not $m.Success) { return $Content }
@@ -177,7 +153,7 @@ function Restore-RepoOwnedKey {
            $Content.Substring($m.Index + $m.Length)
 }
 
-# Helper: read, parameterize username, and write a single file
+# Helper: read, parameterize machine paths, and write a single file
 function Copy-Parameterized {
     param([string]$SrcPath, [string]$DestPath, [string]$Label)
 
@@ -187,36 +163,22 @@ function Copy-Parameterized {
         return
     }
 
-    # -replace, not String.Replace: this direction must be case-INSENSITIVE, because a
-    # local path may spell the username with different casing than $env:USERNAME does
-    # (C:\users\jane\... is the same directory as C:\Users\Jane\...). A case-sensitive
-    # replace would leave those spellings behind as a real-name leak.
-    $content = Get-Content -Path $SrcPath -Raw -Encoding UTF8
+    $content = Read-TextFile $SrcPath
 
-    # Machine paths -> tokens, before the username pass and regardless of any marker.
-    # The marker exempts a file from having its ACCOUNT NAME tokenized because that name
-    # may be a GitHub login; it says nothing about paths, and a machine path is
-    # machine-specific under every reading. The slash-spelling and ordering rules live
-    # with the function, beside Expand-Tokens, so the two directions round-trip.
-    $content = ConvertTo-RepoTokens -Text $content -ConfigRoot $configRoot -Desktop $desktopTok
-
-    $note = ''
-    if ($content -match [regex]::Escape($UserNameLiteralMarker)) {
-        Assert-NoUserPath -Content $content -Label $Label
-        $script:exempt += $Label
-        $script:exemptPaths += [System.IO.Path]::GetFullPath($DestPath)
-        $note = '  (username left literal by marker)'
-    } else {
-        $content = $content -replace [regex]::Escape($username), '{{USERNAME}}'
-        $script:collectedPaths += [System.IO.Path]::GetFullPath($DestPath)
-    }
+    # Machine paths -> tokens: config root, Desktop, then the account name as a path
+    # segment. The slash-spelling, ordering and case rules live with the function, beside
+    # Expand-Tokens, so the two directions round-trip. Then the hard check: anything
+    # still path-shaped is a near miss the tokenizer refused, and committing it would
+    # ship one machine's path.
+    $content = ConvertTo-RepoTokens -Text $content -ConfigRoot $configRoot -Desktop $desktopTok -UserName $username
+    Assert-NoUserPath -Content $content -UserName $username -Label $Label
 
     foreach ($owned in @($repoOwnedKeys | Where-Object { $_.File -eq $Label })) {
         $content = Restore-RepoOwnedKey -Content $content -RepoPath $DestPath -Key $owned.Key
     }
 
     Write-TextFile -Path $DestPath -Content $content
-    Write-Host "[OK]   $Label$note" -ForegroundColor Green
+    Write-Host "[OK]   $Label" -ForegroundColor Green
     $script:collected++
 }
 
@@ -305,63 +267,45 @@ Write-Host "Collected $collected files, skipped $skipped." -ForegroundColor Cyan
 # Escaped pattern + regex matching is the correct pairing: it matches the name
 # literally AND stays case-insensitive, which -SimpleMatch would also have given up.
 #
-# Two checks, because the account name means two different things depending on where it
-# sits, and one sweep for both is what made this warning useless.
+# What it looks for is a HARDCODED PATH: anywhere in the repo, a path-shaped occurrence
+# of the account name (the -Prefix form of the tokenizer's own pattern) is a local path
+# that breaks on the next machine. Files collect just wrote have already passed
+# Assert-NoUserPath; this sweep is for the hand-authored ones (README, the scripts) that
+# never pass through the parameterizer at all.
 #
-#   1. PARAMETERIZATION. In a file this run just wrote, a bare occurrence means the
-#      replace above failed. Mechanical and precise -- so it is scoped to exactly those
-#      files, the ones collect is answerable for, minus any the marker governed.
+# The bare name is deliberately NOT looked for. An earlier version swept for it and
+# reported five hand-authored files where that string is the GITHUB OWNER and has to stay
+# literal: the clone URL in the README, the public repo name, and publish.ps1's own
+# allow-list. It was wrong every single time it spoke, which is how a check trains people
+# to skim past it -- and acting on it would have broken the clone URL and the public-repo
+# scan.
 #
-#   2. HARDCODED PATH. Anywhere in the repo, 'Users\<name>' is a local path that breaks
-#      on the next machine. Unambiguous, so it sweeps everything, marker or no marker.
+# Nor does it police personal identifiers. The repo is private and legitimately names
+# personal and employer systems; the public boundary is publish.ps1's job, and it already
+# scans for the full name and the personal handle while allowing the GitHub login. A
+# second, worse copy of that check here would only add noise.
 #
-# The version before this swept the whole tree for the bare name and so reported five
-# hand-authored files where that string is the GITHUB OWNER and has to stay literal: the
-# clone URL in the README, the public repo name, and publish.ps1's own allow-list. It was
-# wrong every single time it spoke, which is how a check trains people to skim past it --
-# and acting on it would have broken the clone URL and the public-repo scan. Those files
-# are hand-authored in the repo and never pass through the parameterizer at all, so this
-# script was never in a position to have contaminated them.
-#
-# What this deliberately does NOT do is police personal identifiers. The repo is private
-# and legitimately names personal and employer systems; the public boundary is publish.ps1's
-# job, and it already scans for the full name and the personal handle while allowing the
-# GitHub login. A second, worse copy of that check here would only add noise.
-#
-# Marker-governed files are named below rather than passed over in silence: their
-# occurrences are the GitHub login by declaration, and an unexplained gap is what would
-# tempt the next reader to "fix" them back into a placeholder.
-$notParameterized = @()
-if ($collectedPaths) {
-    $notParameterized = @(Select-String -Path $collectedPaths -Pattern ([regex]::Escape($username)))
-}
-
-$hardcodedPaths = @(Get-ChildItem -Path $repoRoot -Recurse -File |
-    Where-Object { $_.FullName -notlike "*\.git\*" -and $_.FullName -notlike "*\.backups\*" } |
-    Select-String -Pattern $UserPathPattern)
-
-if ($exempt) {
-    Write-Host "Username left literal by marker (GitHub login, not a path): $($exempt -join ', ')" -ForegroundColor DarkGray
-}
-
-$failures = 0
-
-if ($notParameterized) {
-    $failures++
-    Write-Host ""
-    Write-Host "WARNING: username '$username' survived parameterization in:" -ForegroundColor Red
-    $notParameterized | ForEach-Object { Write-Host "  $($_.Path):$($_.LineNumber)" -ForegroundColor Red }
-    Write-Host "  a collected file should carry the placeholder -- or the marker, if the name is a GitHub login" -ForegroundColor DarkGray
-}
+# A hit FAILS the collect (exit 1), so sync-config's push stops before committing. It used
+# to be a red WARNING followed by exit 0, and push committed and pushed straight past it.
+# Only files git could commit (tracked, or untracked and not ignored): an ignored editor
+# swap file or log must not block a push it could never be part of.
+$committable = @(& git -C $repoRoot ls-files -co --exclude-standard | Where-Object { $_ } |
+    ForEach-Object { Join-Path $repoRoot ($_ -replace '/', '\') } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+$hardcodedPaths = @($committable | ForEach-Object { Get-Item -LiteralPath $_ } |
+    Select-String -Pattern (Get-UserPathPattern -Segment $username -Prefix))
 
 if ($hardcodedPaths) {
-    $failures++
     Write-Host ""
-    Write-Host "WARNING: hardcoded local path in:" -ForegroundColor Red
+    Write-Host "FAILED: hardcoded local path in:" -ForegroundColor Red
     $hardcodedPaths | ForEach-Object { Write-Host "  $($_.Path):$($_.LineNumber)" -ForegroundColor Red }
     Write-Host "  rewrite with `$HOME or `$env:USERPROFILE -- this path exists on one machine only" -ForegroundColor DarkGray
+    exit 1
 }
 
-if ($failures -eq 0) {
-    Write-Host "Verified: $($collectedPaths.Count) file(s) parameterized, no hardcoded local paths." -ForegroundColor Green
-}
+Write-Host "Verified: $collected file(s) parameterized, no hardcoded local paths." -ForegroundColor Green
+
+# Explicit success. Without it the script's exit status is whatever native command ran
+# last: a .last-deployed naming an unreachable commit makes the guard's 'git diff' exit
+# 128, the guard warns and carries on as designed -- and sync-config, reading
+# $LASTEXITCODE, then aborted every push over a warning.
+exit 0

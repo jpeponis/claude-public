@@ -106,7 +106,8 @@ foreach ($pair in $allPairs) {
     $pair.Content = Expand-Tokens -Text (Read-TextFile $pair.Source) `
                                   -UserName $username -ConfigRoot $configRoot -Desktop $desktopTok
     $pair.Existed = Test-Path $pair.Dest
-    $pair.Changed = -not ($pair.Existed -and ((Read-TextFile $pair.Dest) -eq $pair.Content))
+    # -ceq: -eq ignores case, and a case-only edit then deployed as [SAME].
+    $pair.Changed = -not ($pair.Existed -and ((Read-TextFile $pair.Dest) -ceq $pair.Content))
 }
 
 # --- Backup the files this run is actually going to overwrite ----------------
@@ -245,20 +246,8 @@ if (-not $DryRun) {
     }
 
     # The divergence-guard base: which commit this machine's installed tree now
-    # reflects. collect.ps1 refuses to overwrite repo changes that landed after this
-    # commit while the installed copy disagrees. Untracked; meaningful only here.
-    $previousEap = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        # Index, not '| Select-Object -First 1': that stops the pipeline early, which in
-        # 5.1 kills git and leaves $LASTEXITCODE at -1, so the file was written only
-        # when git happened to exit first.
-        $head = @(& git -C $repoRoot rev-parse HEAD 2>$null)[0]
-        if ($LASTEXITCODE -eq 0 -and $head) {
-            Write-TextFile -Path (Join-Path $repoRoot '.last-deployed') -Content ([string]$head).Trim()
-        }
-    } catch { }
-    finally { $ErrorActionPreference = $previousEap }
+    # reflects (see Set-LastDeployed; sync-config.ps1 push is its other writer).
+    [void](Set-LastDeployed -RepoRoot $repoRoot)
 }
 
 # --- Retention: keep the newest $KeepBackups timestamped backups -------------
@@ -298,14 +287,18 @@ foreach ($profilePath in @(Get-ProfilePaths)) {
 # --- Reminders: encrypted secret store (DPAPI, per-user/per-machine) --------
 # These .enc files cannot be carried between machines; each machine re-encrypts its
 # own secrets locally with Set-Secret.ps1. Registry lives in secrets.json so the
-# scripts stay identical across the private and public repos.
+# scripts stay identical across the private and public repos. An entry tied to a
+# plugin (its 'plugin' field) is only asked for while settings.json enables that
+# plugin -- see Test-SecretApplies.
 $secretChecks = @()
 try {
     $secretChecks = @(Get-SecretsRegistry -RepoRoot $repoRoot)
 } catch {
     Say "[WARN] Could not parse secrets.json; skipping secret checks." 'Yellow'
 }
+$settingsPath = Join-Path $claudeHome 'settings.json'
 foreach ($s in $secretChecks) {
+    if (-not (Test-SecretApplies -Secret $s -SettingsPath $settingsPath)) { continue }
     $encPath = Join-Path $claudeHome ".$($s.name).enc"
     if (-not (Test-Path $encPath)) {
         Write-Host ""

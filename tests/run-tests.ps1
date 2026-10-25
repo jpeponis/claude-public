@@ -23,9 +23,10 @@ function Assert-True {
     else { $script:failed++; Write-Host "  [FAIL] $Name" -ForegroundColor Red }
 }
 
+# -ceq: a test that cannot see a case-only difference cannot test the code that must.
 function Assert-Eq {
     param($Actual, $Expected, [string]$Name)
-    if ($Actual -eq $Expected) { $script:passed++; Write-Host "  [pass] $Name" -ForegroundColor Green }
+    if ($Actual -ceq $Expected) { $script:passed++; Write-Host "  [pass] $Name" -ForegroundColor Green }
     else {
         $script:failed++
         Write-Host "  [FAIL] $Name" -ForegroundColor Red
@@ -74,6 +75,61 @@ Assert-True ($tok -notmatch '\{\{DESKTOP\}\}/claude-config') "CONFIG_ROOT wins o
 $rt = Expand-Tokens -Text $tok -UserName 'Someone' -ConfigRoot $cfg -Desktop $dsk
 Assert-Eq $rt $fwd "expand(tokenize(x)) round-trips"
 
+# --- The account name: tokenized as a path segment only --------------------------
+Section "Username tokenization"
+
+# A name with a space and regex metacharacters, and one where '$' would be a
+# replacement-string group reference if it were not escaped.
+foreach ($u in @('Jane Q. Doe', 'a$1b(c)+')) {
+    $live = @(
+        "path C:\Users\$u\.claude\x.ps1 here"
+        "fwd  c:/users/$u/notes"
+        "json `"C:\\Users\\$u\\.claude\\settings.json`""
+        "bash /c/Users/$u/x and code ``C:\Users\$u``"
+        "clone https://github.com/$u/x.git"
+        "mail $u@example.com"
+        "prose: ask $u, who wrote it"
+        "api   gh api users/$u and https://api.github.com/users/$u"
+    ) -join "`n"
+    $repo = ConvertTo-RepoTokens -Text $live -ConfigRoot 'Z:/cfg' -Desktop 'Z:/dsk' -UserName $u
+    $lines = $repo -split "`n"
+    Assert-Eq $lines[0] 'path C:\Users\{{USERNAME}}\.claude\x.ps1 here' "[$u] a backslash path is tokenized"
+    Assert-Eq $lines[1] 'fwd  c:/users/{{USERNAME}}/notes' "[$u] a forward-slash path is tokenized, case-insensitively"
+    Assert-Eq $lines[2] 'json "C:\\Users\\{{USERNAME}}\\.claude\\settings.json"' "[$u] a JSON-escaped path is tokenized"
+    Assert-Eq $lines[3] 'bash /c/Users/{{USERNAME}}/x and code `C:\Users\{{USERNAME}}`' "[$u] git-bash and backtick-quoted paths are tokenized"
+    Assert-Eq $lines[4] "clone https://github.com/$u/x.git" "[$u] a GitHub URL survives literally"
+    Assert-Eq $lines[5] "mail $u@example.com" "[$u] an email address survives literally"
+    Assert-Eq $lines[6] "prose: ask $u, who wrote it" "[$u] a prose mention survives literally"
+    Assert-Eq $lines[7] "api   gh api users/$u and https://api.github.com/users/$u" "[$u] GitHub API users/<login> forms are not paths"
+    $back = Expand-Tokens -Text $repo -UserName $u -ConfigRoot 'Z:/cfg' -Desktop 'Z:/dsk'
+    Assert-Eq $back $live "[$u] deploy(collect(x)) round-trips"
+    Assert-True ((ConvertTo-RepoTokens -Text $back -ConfigRoot 'Z:/cfg' -Desktop 'Z:/dsk' -UserName $u) -ceq $repo) "[$u] collect(deploy(repo)) is the repo text again"
+    $ok = $true
+    try { Assert-NoUserPath -Content $repo -UserName $u -Label 'x' } catch { $ok = $false }
+    Assert-True $ok "[$u] tokenized output passes the leak assertion"
+}
+
+# Across machines: what one account collected, another account's deploy points home.
+$fromA = ConvertTo-RepoTokens -Text 'C:/Users/Jane Q. Doe/.claude/x' -ConfigRoot 'Z:/cfg' -Desktop 'Z:/dsk' -UserName 'Jane Q. Doe'
+Assert-Eq (Expand-Tokens -Text $fromA -UserName 'a$1b(c)+' -ConfigRoot 'c' -Desktop 'd') 'C:/Users/a$1b(c)+/.claude/x' "a path collected on one account deploys to another's profile"
+
+# A name that merely starts another account's directory is not that directory.
+Assert-Eq (ConvertTo-RepoTokens -Text 'C:\Users\janet\x' -ConfigRoot 'Z:/c' -Desktop 'Z:/d' -UserName 'jane') 'C:\Users\janet\x' "a longer profile name is not tokenized"
+
+# The token in prose -- documenting it -- deploys as itself, so no collect can lose it.
+$doc = 'Usernames are parameterized ({{USERNAME}}); the hook runs C:/Users/{{USERNAME}}/x.ps1'
+$docOut = Expand-Tokens -Text $doc -UserName 'Jane Q. Doe' -ConfigRoot 'c' -Desktop 'd'
+Assert-Eq $docOut 'Usernames are parameterized ({{USERNAME}}); the hook runs C:/Users/Jane Q. Doe/x.ps1' "only the path-shaped token expands"
+Assert-Eq (ConvertTo-RepoTokens -Text $docOut -ConfigRoot 'Z:/c' -Desktop 'Z:/d' -UserName 'Jane Q. Doe') $doc "a prose token round-trips"
+
+# The leak assertion fires on a path-shaped near miss the tokenizer refused, and on
+# nothing else.
+$near = ConvertTo-RepoTokens -Text 'old profile C:\Users\Jane Q. Doe.CORP\x' -ConfigRoot 'Z:/c' -Desktop 'Z:/d' -UserName 'Jane Q. Doe'
+Assert-Throws { Assert-NoUserPath -Content $near -UserName 'Jane Q. Doe' -Label 'x' } "a near-miss profile path fails the leak assertion"
+$ok = $true
+try { Assert-NoUserPath -Content 'https://api.github.com/users/Jane Q. Doe and Jane Q. Doe@example.com' -UserName 'Jane Q. Doe' -Label 'x' } catch { $ok = $false }
+Assert-True $ok "a login or email is not a leak"
+
 # --- Manifest validation ------------------------------------------------------
 Section "Manifest validation"
 
@@ -81,6 +137,19 @@ $m = Get-ArtifactManifest -ClaudeHome 'X:\ch' -CodexHome 'X:\cx' -AgentsHome 'X:
 $mOk = $true
 try { Test-ArtifactManifest -Manifest $m } catch { $mOk = $false }
 Assert-True $mOk "the real manifest validates"
+$mOk = $true
+try { Test-ArtifactManifest -Manifest $m -RepoRoot $repoRoot } catch { $mOk = $false }
+Assert-True $mOk "the real manifest validates against the real repo tree"
+
+# workflows-on.json: what 'claude --settings ~/.claude/workflows-on.json' needs to exist.
+$wf = @($m.Files | Where-Object { $_.Id -eq 'workflows-on' })
+Assert-Eq $wf.Count 1 "workflows-on is a manifest file artifact"
+Assert-Eq $wf[0].Repo 'global\workflows-on.json' "workflows-on ships from global\"
+Assert-Eq (@($wf[0].Destinations) -join ',') 'X:\ch\workflows-on.json' "workflows-on deploys to ~/.claude/workflows-on.json"
+Assert-True ($wf[0].Authority -eq 'installed' -and $wf[0].CollectFrom -eq 'X:\ch\workflows-on.json') "workflows-on is collected from its installed copy"
+$wfRepo = Join-Path $repoRoot 'global\workflows-on.json'
+Assert-Eq ([System.IO.File]::ReadAllText($wfRepo)) "{ `"enableWorkflows`": true }`n" "the repo file is exactly the overlay, LF-terminated"
+Assert-True ((Read-TextFile $wfRepo | ConvertFrom-Json).enableWorkflows -eq $true) "the overlay parses and turns workflows on"
 
 Assert-Throws {
     Test-ArtifactManifest -Manifest @{
@@ -185,6 +254,20 @@ $bom = Join-Path $tmp 'bom.md'
 [System.IO.File]::WriteAllText($bom, 'text', [System.Text.UTF8Encoding]::new($true))
 Assert-Eq (Read-TextFile $bom) 'text' "a UTF-8 BOM is dropped, as Get-Content -Encoding UTF8 drops it"
 
+# --- Profile block: an empty profile, and case-only staleness --------------------
+Section "Profile block"
+
+$prof = Join-Path $tmp 'profile\Microsoft.PowerShell_profile.ps1'
+Write-TextFile -Path $prof -Content ''
+Assert-Eq (Add-ClaudeProfileBlock -Path $prof -DryRun) 'would-add' "an empty profile previews an add (it used to throw)"
+Assert-Eq (Add-ClaudeProfileBlock -Path $prof) 'added' "an empty profile gets the block"
+Assert-True (Test-ClaudeProfileBlock -Path $prof) "the added block is detected"
+Assert-Eq (Add-ClaudeProfileBlock -Path $prof) 'unchanged' "a current block is left alone"
+$profText = Read-TextFile $prof
+Write-TextFile -Path $prof -Content $profText.Replace('Test-Path', 'test-path')
+Assert-Eq (Add-ClaudeProfileBlock -Path $prof) 'updated' "a block differing only in case is rewritten"
+Assert-True ((Read-TextFile $prof) -ceq $profText) "the rewrite restores the exact block"
+
 # --- Divergence candidacy -----------------------------------------------------
 Section "Divergence candidacy"
 
@@ -269,6 +352,12 @@ Assert-True ((Get-Content (Join-Path $repo3 'codex\AGENTS.md') -Raw) -notmatch '
 $r3 = @(Update-GeneratedArtifacts -RepoRoot $repo3 -Manifest $gm -Check)
 Assert-Eq $r3[0].State 'current' "freshly built output reports current"
 
+$genOut = Join-Path $repo3 'codex\AGENTS.md'
+$genText = Read-TextFile $genOut
+Write-TextFile -Path $genOut -Content $genText.Replace('shared', 'SHARED')
+Assert-Eq (@(Update-GeneratedArtifacts -RepoRoot $repo3 -Manifest $gm -Check))[0].State 'stale' "an output differing only in case reports stale"
+Write-TextFile -Path $genOut -Content $genText
+
 # --- Derived agent definition ---------------------------------------------------
 Section "Derived agent definition"
 
@@ -328,6 +417,61 @@ Assert-Throws {
     Test-ArtifactManifest -Manifest @{ Files = @($agentArt); Dirs = @(@{ Id = 'd'; Repo = 'global\agents'; Destinations = @('X:\a'); Authority = 'installed'
         CollectFrom = 'X:\a'; Filter = '*.md'; Recurse = $false; ExcludeMembersOf = @('directed-agent', 'nope') }) }
 } "an unknown id anywhere in the list throws"
+
+# --- Secrets tied to a plugin -----------------------------------------------------
+Section "Secrets that serve a plugin"
+
+$setDir = Join-Path $tmp 'settings'
+$setOn  = Join-Path $setDir 'on.json'
+$setOff = Join-Path $setDir 'off.json'
+$setStr = Join-Path $setDir 'string.json'
+$setBad = Join-Path $setDir 'bad.json'
+$setNone = Join-Path $setDir 'none.json'
+Write-TextFile -Path $setOn   -Content '{ "enabledPlugins": { "github@claude-plugins-official": true, "other@x": false } }'
+Write-TextFile -Path $setOff  -Content '{ "enabledPlugins": { "github@claude-plugins-official": false } }'
+Write-TextFile -Path $setStr  -Content '{ "enabledPlugins": { "github@claude-plugins-official": "true" } }'
+Write-TextFile -Path $setBad  -Content '{ "enabledPlugins": '
+Write-TextFile -Path $setNone -Content '{ "model": "opus" }'
+$ghSecret    = [pscustomobject]@{ name = 'github-token'; purpose = 'p'; plugin = 'github@claude-plugins-official' }
+$plainSecret = [pscustomobject]@{ name = 'openrouter-key'; purpose = 'p' }
+
+Assert-True (Test-SecretApplies -Secret $plainSecret -SettingsPath (Join-Path $setDir 'missing.json')) "a secret with no plugin always applies"
+Assert-True (Test-SecretApplies -Secret $ghSecret -SettingsPath $setOn) "a plugin secret applies while its plugin is enabled"
+Assert-True (-not (Test-SecretApplies -Secret $ghSecret -SettingsPath $setOff)) "a disabled plugin's secret does not apply"
+Assert-True (-not (Test-SecretApplies -Secret $ghSecret -SettingsPath $setNone)) "no enabledPlugins at all: does not apply"
+Assert-True (-not (Test-SecretApplies -Secret ([pscustomobject]@{ name = 'n'; plugin = 'absent@x' }) -SettingsPath $setOn)) "a plugin missing from enabledPlugins: does not apply"
+Assert-True (-not (Test-SecretApplies -Secret $ghSecret -SettingsPath $setStr)) "only a JSON true counts, not the string 'true'"
+Assert-True (-not (Test-SecretApplies -Secret $ghSecret -SettingsPath $setBad)) "unreadable settings: does not apply"
+Assert-True (-not (Test-SecretApplies -Secret $ghSecret -SettingsPath (Join-Path $setDir 'missing.json'))) "missing settings: does not apply"
+Assert-True (Test-SecretApplies -Secret @{ name = 'h'; plugin = 'github@claude-plugins-official' } -SettingsPath $setOn) "a hashtable entry works too"
+
+$registry = @(Get-SecretsRegistry -RepoRoot $repoRoot)
+Assert-Eq (@($registry | Where-Object { $_.name -eq 'github-token' })[0].plugin) 'github@claude-plugins-official' "secrets.json ties github-token to the GitHub plugin"
+Assert-Eq (@($registry | Where-Object { $_.plugin }).Count) 1 "no other registered secret is tied to a plugin"
+
+# --- .last-deployed ------------------------------------------------------------------
+Section "Divergence-guard base"
+
+$gitRepo = Join-Path $tmp 'gitrepo'
+New-Item -ItemType Directory -Path $gitRepo -Force | Out-Null
+Write-TextFile -Path (Join-Path $gitRepo 'f.txt') -Content 'x'
+$previousEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & git -C $gitRepo init -q 2>$null | Out-Null
+    & git -C $gitRepo add f.txt 2>$null | Out-Null
+    & git -C $gitRepo -c user.name=t -c user.email=t@example.invalid commit -q -m c0 2>$null | Out-Null
+    $headSha = @(& git -C $gitRepo rev-parse HEAD 2>$null)[0]
+} finally { $ErrorActionPreference = $previousEap }
+Assert-True (Set-LastDeployed -RepoRoot $gitRepo) "Set-LastDeployed writes in a git repo"
+Assert-Eq (Read-TextFile (Join-Path $gitRepo '.last-deployed')) $headSha "it records HEAD"
+$noGit = Join-Path $tmp 'not-a-repo'
+New-Item -ItemType Directory -Path $noGit -Force | Out-Null
+$env:GIT_CEILING_DIRECTORIES = $tmp   # however the profile directory is set up, stop here
+try {
+    Assert-True (-not (Set-LastDeployed -RepoRoot $noGit)) "outside a git repo it writes nothing and says so"
+} finally { Remove-Item Env:\GIT_CEILING_DIRECTORIES -ErrorAction SilentlyContinue }
+Assert-True (-not (Test-Path (Join-Path $noGit '.last-deployed'))) "and no file appears"
 
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue

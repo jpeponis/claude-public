@@ -157,14 +157,20 @@ log("Key assertions (" + KEY.length + "): " + KEY.map(k => k.slice(0, 40)).join(
 const normURL = u => {
   try {
     const p = new URL(u)
-    return (p.hostname.replace(/^www\./, "") + p.pathname.replace(/\/$/, "")).toLowerCase()
-  } catch { return u.toLowerCase() }
+    // Keep path case and query (distinct pages); drop fragment and utm_* tracking params; lowercase host only.
+    const params = [...p.searchParams].filter(([k]) => !/^utm_/i.test(k))
+    const query = params.length ? "?" + new URLSearchParams(params).toString() : ""
+    return p.hostname.replace(/^www\./, "").toLowerCase() + p.pathname.replace(/\/$/, "") + query
+  } catch { return String(u).trim() }
 }
 const seen = new Map()
 const dupes = []
 const budgetDropped = []
 const relRank = { high: 0, medium: 1, low: 2 }
-let fetchSlots = MAX_FETCH
+// MAX_FETCH is split evenly across angles: the pipeline has no barrier, so a shared pool
+// let whichever searchers finished first take every slot and starve the rest. Each angle
+// fetches its most relevant results first; a remainder smaller than one per angle goes unused.
+const PER_ANGLE_FETCH = Math.max(1, Math.floor(MAX_FETCH / Math.max(1, scope.angles.length)))
 
 // ─── Prompts ───
 const SEARCH_PROMPT = (angle) =>
@@ -246,19 +252,21 @@ const searchResults = await pipeline(
   }),
 
   searchResult => {
+    if (!searchResult || !Array.isArray(searchResult.results)) return []
     const sorted = [...searchResult.results].sort((a, b) => relRank[a.relevance] - relRank[b.relevance])
+    let angleSlots = PER_ANGLE_FETCH
     const novel = sorted.filter(r => {
       const key = normURL(r.url)
       if (seen.has(key)) {
         dupes.push({ ...r, angle: searchResult.angle, dupOf: seen.get(key) })
         return false
       }
-      if (fetchSlots <= 0 && relRank[r.relevance] >= 1) {
+      if (angleSlots <= 0) {
         budgetDropped.push({ ...r, angle: searchResult.angle })
         return false
       }
       seen.set(key, { angle: searchResult.angle, title: r.title })
-      fetchSlots--
+      angleSlots--
       return true
     })
     if (novel.length < searchResult.results.length) {
@@ -329,7 +337,8 @@ const verified = (await parallel(
       agentType: WORKER_AGENT,
     })
     if (!scan) {
-      return { ...claim, votes: [], refutedVotes: 0, escalated: false, survives: false, keyRelevant: false }
+      // Agent failure, not a verdict: neither confirmed nor refuted.
+      return { ...claim, votes: [], refutedVotes: 0, escalated: false, survives: false, unverified: true, keyRelevant: false }
     }
 
     const weakSource = qualRank[claim.sourceQuality] >= 2 // blog/forum/unreliable
@@ -352,27 +361,33 @@ const verified = (await parallel(
 
     const votes = [scan, ...lenses]
     const refutedVotes = votes.filter(v => v.refuted).length
-    const survives = votes.length >= REFUTATIONS_REQUIRED && refutedVotes < REFUTATIONS_REQUIRED
-    log("escalated " + votes.length + "-vote \"" + claim.claim.slice(0, 40) + "…\": " + (votes.length - refutedVotes) + "-" + refutedVotes + (survives ? " ✓" : " ✗") + (scan.keyRelevant ? " [key]" : ""))
-    return { ...claim, votes, refutedVotes, escalated: true, survives, keyRelevant: scan.keyRelevant }
+    // Fewer than 2 votes means the lenses failed (agent failure): unverified, not refuted.
+    const unverified = votes.length < 2
+    const survives = !unverified && refutedVotes < REFUTATIONS_REQUIRED
+    log("escalated " + votes.length + "-vote \"" + claim.claim.slice(0, 40) + "…\": " + (votes.length - refutedVotes) + "-" + refutedVotes + (unverified ? " ? (unverified)" : survives ? " ✓" : " ✗") + (scan.keyRelevant ? " [key]" : ""))
+    return { ...claim, votes, refutedVotes, escalated: true, survives, unverified, keyRelevant: scan.keyRelevant }
   })())
 )).filter(Boolean)
 
 const confirmed = verified.filter(c => c.survives)
-const killed = verified.filter(c => !c.survives)
+const unverifiedClaims = verified.filter(c => c.unverified)
+const killed = verified.filter(c => !c.survives && !c.unverified)
+const unverifiedOut = unverifiedClaims.map(c => ({ claim: c.claim, source: c.sourceUrl, quote: c.quote, reason: c.votes.length ? "verifier agents failed (" + c.votes.length + " vote)" : "scan agent failed" }))
 const escalatedCount = verified.filter(c => c.escalated).length
 const verifyAgents = verified.length + 2 * escalatedCount // scans + 2 lenses per escalation
-log("Verify done: " + verified.length + " claims (" + escalatedCount + " escalated, " + verifyAgents + " agents) → " + confirmed.length + " confirmed, " + killed.length + " killed")
+log("Verify done: " + verified.length + " claims (" + escalatedCount + " escalated, " + verifyAgents + " agents) → " + confirmed.length + " confirmed, " + killed.length + " killed, " + unverifiedClaims.length + " unverified (agent failures)")
 
 if (confirmed.length === 0) {
   return {
     question: QUESTION,
     keyAssertions: KEY,
-    summary: "All " + verified.length + " claims failed verification. Research inconclusive — sources may be low-quality or claims overstated.",
+    summary: "No claims were confirmed out of " + verified.length + ": " + killed.length + " refuted by verification, " + unverifiedClaims.length + " unverified because verifier agents failed (not a judgment on the claims). " +
+      (unverifiedClaims.length > 0 && killed.length === 0 ? "Research inconclusive due to agent failures — consider re-running." : "Research inconclusive — sources may be low-quality or claims overstated."),
     findings: [],
     refuted: killed.map(c => ({ claim: c.claim, vote: voteStr(c), source: c.sourceUrl })),
+    unverified: unverifiedOut,
     sources: allSources.map(s => ({ url: s.url, quality: s.sourceQuality, claimCount: s.claims.length })),
-    stats: { angles: scope.angles.length, sources: allSources.length, claims: allClaims.length, verified: verified.length, escalated: escalatedCount, confirmed: 0, killed: killed.length, verifyAgents },
+    stats: { angles: scope.angles.length, sources: allSources.length, claims: allClaims.length, verified: verified.length, escalated: escalatedCount, confirmed: 0, killed: killed.length, unverified: unverifiedClaims.length, verifyAgents },
   }
 }
 
@@ -391,12 +406,17 @@ const killedBlock = killed.length > 0
     killed.map(c => "- \"" + c.claim + "\" (" + c.sourceUrl + ", vote " + voteStr(c) + ")").join("\n")
   : ""
 
+const unverifiedBlock = unverifiedClaims.length > 0
+  ? "\n## Unverified claims (verifier agents failed; neither confirmed nor refuted — do not present as findings, mention only as unchecked)\n" +
+    unverifiedClaims.map(c => "- \"" + c.claim + "\" (" + c.sourceUrl + ")").join("\n")
+  : ""
+
 const report = await agent(
   "## Synthesis: research report\n\n" +
   "**Question:** " + QUESTION + "\n\n" +
   (KEY.length ? "**Key assertions to address:**\n" + KEY.map((k, i) => (i + 1) + ". " + k).join("\n") + "\n\n" : "") +
   confirmed.length + " claims passed verification. Merge semantic duplicates and synthesize.\n\n" +
-  "## Confirmed claims\n" + block + "\n" + killedBlock + "\n\n" +
+  "## Confirmed claims\n" + block + "\n" + killedBlock + unverifiedBlock + "\n\n" +
   "## Instructions\n" +
   "1. Identify claims that say the same thing — merge them, combine their sources.\n" +
   "2. Group related claims into coherent findings. Each finding should directly address the research question (prioritize the key assertions).\n" +
@@ -415,8 +435,9 @@ if (!report) {
     findings: [],
     confirmed: confirmed.map(c => ({ claim: c.claim, source: c.sourceUrl, quote: c.quote, vote: voteStr(c) })),
     refuted: killed.map(c => ({ claim: c.claim, vote: voteStr(c), source: c.sourceUrl })),
+    unverified: unverifiedOut,
     sources: allSources.map(s => ({ url: s.url, quality: s.sourceQuality, claimCount: s.claims.length })),
-    stats: { angles: scope.angles.length, sources: allSources.length, claims: allClaims.length, verified: verified.length, escalated: escalatedCount, confirmed: confirmed.length, killed: killed.length, verifyAgents, afterSynthesis: 0 },
+    stats: { angles: scope.angles.length, sources: allSources.length, claims: allClaims.length, verified: verified.length, escalated: escalatedCount, confirmed: confirmed.length, killed: killed.length, unverified: unverifiedClaims.length, verifyAgents, afterSynthesis: 0 },
   }
 }
 
@@ -441,6 +462,7 @@ return {
   ...report,
   completeness: critique || { note: "critic returned no result" },
   refuted: killed.map(c => ({ claim: c.claim, vote: voteStr(c), source: c.sourceUrl })),
+  unverified: unverifiedOut,
   sources: allSources.map(s => ({ url: s.url, quality: s.sourceQuality, angle: s.angle, claimCount: s.claims.length })),
   stats: {
     angles: scope.angles.length,
@@ -454,6 +476,7 @@ return {
     escalated: escalatedCount,
     confirmed: confirmed.length,
     killed: killed.length,
+    unverified: unverifiedClaims.length,
     afterSynthesis: report.findings.length,
     urlDupes: dupes.length,
     budgetDropped: budgetDropped.length,

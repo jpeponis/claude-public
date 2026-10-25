@@ -1,11 +1,11 @@
 ---
 name: sync-config
-description: Push or pull this machine's agent configuration - Claude Code and Codex CLI settings, skills, agents, workflows, statusline, generated AGENTS.md files and shell functions - through the private claude-config git repo, then verify the result with doctor. Use when the user wants to sync, back up or restore their Claude Code or Codex setup, propagate a config change to their other machines, or pick up changes made on another machine.
+description: Push or pull this machine's agent configuration - Claude Code and Codex CLI settings, skills, agents, workflows, statusline, generated AGENTS.md files and shell functions - through the claude-config git repo, then verify the result with doctor. Use when the user wants to sync, back up or restore their Claude Code or Codex setup, propagate a config change to their other machines, or pick up changes made on another machine.
 ---
 
 # Sync Agent Configuration
 
-Keeps Claude Code and Codex CLI configuration in sync across machines via a private
+Keeps Claude Code and Codex CLI configuration in sync across machines via a
 GitHub repo (`{{CONFIG_ROOT}}`).
 
 ## Usage
@@ -23,12 +23,11 @@ are collected from the `~/.claude` copy only.
 dot-sources `~/.claude/claude-functions.ps1` and `~/.codex/codex-functions.ps1`, and
 never rewrites anything else in it. Sensitive files (API keys, OAuth tokens) are
 excluded - they are DPAPI-encrypted per machine. Codex machine state (`auth.json`,
-`config.toml`, databases, trust records) never syncs. Username is parameterized
-(`{{USERNAME}}`) so the repo is machine-portable.
+`config.toml`, databases, trust records) never syncs. The Windows account name is replaced by a placeholder in the repo, so it is machine-portable.
 
 ## Behavior
 
-The script is `sync-config.ps1` in the config repo. Always quote `"$HOME/..."` in bash so the variable expands. Do NOT use `$env:USERPROFILE`.
+The script is `sync-config.ps1` in the config repo.
 
 ### Pull (default)
 Run:
@@ -64,13 +63,13 @@ then:
 Never pick `-Force` without asking.
 
 ## Troubleshooting
-- **git push/pull auth fails**: git's configured credential helper handles auth (`git config --show-origin --get-regexp '^credential'` shows which; on a machine where `gh auth setup-git` has run, github.com uses `gh`). Run `git -C "{{CONFIG_ROOT}}" push origin main` manually to diagnose. On a new machine the repo must be cloned first - see the README for the clone URL and first-time setup. (Do not reconstruct the URL from `{{USERNAME}}`: that placeholder is the *Windows* account name, not the GitHub account.)
+- **git push/pull auth fails**: git's configured credential helper handles auth (`git config --show-origin --get-regexp '^credential'` shows which; on a machine where `gh auth setup-git` has run, github.com uses `gh`). Run `git -C "{{CONFIG_ROOT}}" push origin main` manually to diagnose. On a new machine the repo must be cloned first - see the README for the clone URL and first-time setup. (Do not build the clone URL from the Windows account name; it is not necessarily the GitHub handle.)
 - **"Nothing to commit"**: Local config already matches the repo. This is normal.
 - **Doctor fails on "stale generated file(s)"**: someone edited a CLAUDE.md source (or a generated AGENTS.md directly) without running collect. Run `collect.ps1` to rebuild, then `deploy.ps1`.
 - **Doctor warns the public repo has fallen behind**: shared files changed in the private repo since the last publish. Run `publish.ps1` (in the config repo) for the list, then `-Apply`; review and commit in the public clone it names. Only this repo has `publish.ps1`; a public fork never sees this check.
 - **Merge conflicts after push pull**: Resolve manually in the repo directory, then retry.
 - **Missing secret warning on pull**: Expected on a new machine. Secrets are DPAPI-encrypted locally - they can't be synced. Create them with `Set-Secret.ps1`.
-- **Missing GITHUB_PERSONAL_ACCESS_TOKEN warning**: Only needed for the GitHub MCP server, not for git push/pull.
+- **Missing github-token warning**: shown only when the GitHub plugin is enabled in settings.json. The token is used only by that plugin (loaded by the launchers for the session); git push/pull and `gh` have their own login and never need it.
 - **Deploy overwrites local edits**: The deploy script backs up existing files to `.backups/<timestamp>/` before overwriting, and a failed deploy rolls itself back from the same backups. Check there to recover.
 - **`sh.exe` or `bash.exe: *** fatal error - add_item ("\??\C:\Program Files\Git", "/", ...) failed, errno 1`**, usually followed by `fatal: could not read Username for 'https://github.com': terminal prompts disabled` and `ERROR: git pull failed`: this is **not** a sync-config failure, and nothing has changed when it happens. It's an MSYS/Git-for-Windows init race ([git-for-windows/git#6368](https://github.com/git-for-windows/git/issues/6368)): while the Windows status line (which CC wraps in Git Bash and `taskkill`s on every supersede) is churning bash processes, a bash killed mid-init holds a 15s spinlock and any MSYS process starting meanwhile aborts. Two MSYS processes are exposed. One is the Bash tool's own bash, if it launches the script (exit `0xC0000005` after a ~15s hang). The other is started by **git itself on every authenticated GitHub fetch or push**: `~/.gitconfig` sets the github.com credential helper to `!'C:\Program Files\GitHub CLI\gh.exe' auth git-credential` (the form `gh auth setup-git` writes), and a `!` helper runs as a shell snippet through `sh.exe`. So **launching through the PowerShell tool does not avoid it.** **Fix: retry, spaced ~20s apart.** A loop in one PowerShell tool call is what got pull and push through on 2026-09-20:
   ```powershell

@@ -20,6 +20,8 @@ Two scope notes up front:
 
 - `global/` — The Claude Code user target, deployed to `%USERPROFILE%\.claude\`
   - `settings.json` — Global settings, permissions, model, and statusline registration
+  - `workflows-on.json` — A one-key settings overlay (`{ "enableWorkflows": true }`) for
+    `claude --settings`; see *Dynamic Workflows*
   - `CLAUDE.md` — User-level instructions: what holds wherever you start a session. Also the
     *source* of the generated Codex instructions (see below)
   - `statusline-command.ps1` — Statusline showing user@machine, directory and git branch,
@@ -85,7 +87,8 @@ Two scope notes up front:
 - `Set-Secret.ps1` / `Get-Secret.ps1` — Per-machine encrypted secret store (repo-native).
   Secrets are DPAPI-encrypted to `%USERPROFILE%\.claude\.<name>.enc` (current user, current
   machine only) and are never collected or deployed; `deploy.ps1` warns about missing ones
-- `secrets.json` — Registry of which secrets exist and what each one unlocks
+- `secrets.json` — Registry of which secrets exist and what each one unlocks. An entry with a
+  `plugin` field is expected only while that Claude Code plugin is enabled
 - `lib/Common.ps1` — Shared helpers: the artifact manifest (what syncs, declared once and read
   by collect, deploy and doctor), token substitution in both directions, the
   derived-instructions build, file enumeration, profile discovery, managed-block injection,
@@ -192,9 +195,17 @@ repo, and `deploy.ps1` expands them on the way back out:
 
 Collect matches case-insensitively and accepts either slash direction, since a path on disk
 may be spelled differently than `%USERNAME%` reports it. Deploy substitutes literally, in
-forward-slash form, which both PowerShell and Git Bash accept. Afterwards `collect.ps1`
-verifies that no real username survived into the repo, and `doctor.ps1` fails if any synced
-markdown hardcodes a Desktop path.
+forward-slash form, which both PowerShell and Git Bash accept.
+
+The username token is **path-only**, in both directions. Collect replaces the account name
+only where it is the path segment after `Users\` or `Users/` (the JSON-escaped `Users\\` too),
+and deploy expands `{{USERNAME}}` only in that position. Anywhere else the same string is
+somebody's identity — a GitHub handle, an email address, a person's name in prose — and it is
+never rewritten, so it cannot turn into the next machine's account name on the way back out.
+Afterwards `collect.ps1` fails if any file still holds a path-shaped occurrence of the account
+name it could not tokenize (a `C:\Users\<name>.old\`, say), and `doctor.ps1` fails if synced
+markdown spells out a literal `Desktop\claude-config` or `Desktop\claude-scratch` path (either
+slash direction).
 
 Markdown needs the tokens as much as JSON does. A skill telling the model to run
 `$HOME/Desktop/claude-config/something.ps1` is wrong on any machine where OneDrive Known
@@ -212,13 +223,17 @@ default; edit the file to change it.
 - Windows
 - [Git](https://git-scm.com/) installed and configured with GitHub credentials
 - [GitHub CLI](https://cli.github.com/), authenticated with `gh auth login` (used to fork)
-- [Node.js 22+](https://nodejs.org/)
-- Claude Code (`npm install -g @anthropic-ai/claude-code`)
+- Claude Code, from the native installer (`irm https://claude.ai/install.ps1 | iex`) or
+  `winget install Anthropic.ClaudeCode` (WinGet installs do not auto-update). npm
+  (`npm install -g @anthropic-ai/claude-code`) is the advanced option: it needs Node.js 22+ to
+  install, but what it installs is the same native binary, which does not use Node at runtime
 - Optional: Codex CLI (`npm install -g @openai/codex`) — without it, doctor simply reports the
-  Codex target unchecked
+  Codex target unchecked. This is what [Node.js](https://nodejs.org/) is for: npm-installed
+  tools like Codex need it, and nothing else here does
 
-`bootstrap.ps1` checks each one and stops with the exact command to fix it, rather than
-half-installing.
+`bootstrap.ps1` checks git and gh and stops with the exact command to fix either, rather than
+half-installing. A missing Claude Code is only a warning (installing the config first is a
+legitimate order to do things in), and a missing Node is just reported.
 
 ### Steps
 
@@ -238,6 +253,18 @@ half-installing.
    ```
 
    Other flags: `-NoFork` (read-only clone, no config push), `-Dest <path>`, `-Yes`.
+
+   Either web form runs inside your current PowerShell session, so the script never calls
+   `exit` there — that would close the session, and the Terminal tab with the output in it. It
+   leaves its exit code in `$LASTEXITCODE` instead.
+
+   One more step appears in the plan on most fresh machines. The launchers load from your
+   PowerShell profile, and Windows PowerShell 5.1's default execution policy on Windows 11,
+   `Restricted`, never runs a profile at all (PowerShell 7 defaults to `RemoteSigned` and needs
+   nothing). So when bootstrap finds 5.1's effective policy `Restricted` or `AllSigned`, it adds
+   *Set Windows PowerShell's CurrentUser execution policy to RemoteSigned* to the plan, and
+   does it after you confirm. If Group Policy sets the policy, nothing a user can set overrides
+   it; bootstrap says so and installs anyway, and the launchers then load only in PowerShell 7.
 
    The fork is the default rather than an afterthought. `sync-config push` pushes to
    `origin`, so a plain clone of someone else's repo is a setup whose push half is broken from
@@ -264,43 +291,59 @@ Clone the repo (fork it first if you want `/sync-config push` to work), then dep
 verify:
 
 ```powershell
-git clone https://github.com/<you>/claude-public.git "$env:USERPROFILE\Desktop\claude-config"
-cd "$env:USERPROFILE\Desktop\claude-config"
+$repo = Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config'
+git clone https://github.com/<you>/claude-public.git $repo
+cd $repo
+git remote add upstream https://github.com/jpeponis/claude-public.git
 powershell -ExecutionPolicy Bypass -File deploy.ps1
 powershell -ExecutionPolicy Bypass -File doctor.ps1
 ```
 
-(Deploy resolves the true Desktop itself; the clone path above is only where the repo lives,
-and `deploy.ps1` writes `.config-root` pointers so the launchers find it wherever you put it.)
+(`GetFolderPath` rather than `$env:USERPROFILE\Desktop`, because OneDrive Known Folder Move
+can redirect the Desktop, leaving the literal path missing or stale. Deploy resolves the true
+Desktop itself; `$repo` is only where the repo lives, and `deploy.ps1` writes `.config-root`
+pointers so the launchers find it wherever you put it. The `upstream` remote is what
+`git pull upstream main` uses later; bootstrap adds it for you.)
 
-### Optional: GitHub Personal Access Token
+If doctor reports Windows PowerShell's execution policy as `Restricted` or `AllSigned`, your
+profile — and with it every launcher — never loads there. Fix it in Windows PowerShell with
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, which is the step bootstrap would have
+taken for you.
 
-The GitHub MCP plugin is enabled in `settings.json` and needs a token to do anything.
-Everything else works without it.
+### Optional: GitHub MCP plugin
 
-1. Go to https://github.com/settings/tokens?type=beta (Fine-grained tokens)
-2. Click "Generate new token"
-3. Name it something like "Claude Code"
-4. Set expiration (if you want it to expire)
-5. Under "Repository access", select "All repositories" (or specific ones)
-6. Under "Permissions", grant:
-   - **Contents**: Read and write
-   - **Issues**: Read and write
-   - **Pull requests**: Read and write
-   - **Metadata**: Read-only (auto-selected)
-7. Click "Generate token" and copy it
-8. Store it in the encrypted secret store:
+The GitHub MCP plugin (`github@claude-plugins-official`) ships **off**, and most people can
+leave it that way: bootstrap already requires `gh auth login`, and Claude can do most GitHub
+work through `gh` without the plugin. To use it anyway:
+
+1. Turn it on: set `"github@claude-plugins-official"` to `true` under `enabledPlugins` in
+   `~/.claude/settings.json` — the deployed copy, as with any setting — then push
+   (`/sync-config push`), so your other machines get it too.
+2. Create a fine-grained token at https://github.com/settings/tokens?type=beta: name it
+   something like "Claude Code", set an expiration if you want one, choose "All repositories"
+   (or specific ones) under "Repository access", and under "Permissions" grant **Contents**,
+   **Issues** and **Pull requests** read and write (**Metadata** read-only is selected
+   automatically).
+3. Store it in the encrypted secret store:
    ```powershell
+   cd (Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config')
    .\Set-Secret.ps1 -Name github-token
    ```
    The prompt hides the input and DPAPI-encrypts the token to `~/.claude/.github-token.enc`,
-   readable only by your Windows account on that machine. `claude-functions.ps1` loads it into
-   the environment at shell start, so the plaintext never lands in your registry, your shell
-   history, or a file.
+   readable only by your Windows account on that machine.
+
+Nothing is decrypted at shell start. The launchers — `claude-sp`, `claude-or` and their
+variants — load the token into the environment only for a session where the plugin is
+enabled in `~/.claude/settings.json` and the secret exists, and remove it again when the
+session ends; a `GITHUB_PERSONAL_ACCESS_TOKEN` you set yourself is left alone. A session
+started with plain `claude` does not get the token. The plaintext never lands in your
+registry, your shell history, or a file. `deploy.ps1` and `doctor.ps1` mention the secret
+only while the plugin is on.
 
 Setting `GITHUB_PERSONAL_ACCESS_TOKEN` as a plain user environment variable instead stores the
-token in the registry in clear text, and the loader only reads the encrypted store when the
-variable is unset — so doing both silently gives you the weaker of the two.
+token in the registry in clear text, where every process you start inherits it — and the
+launchers only read the encrypted store when the variable is unset, so doing both silently
+gives you the weaker of the two.
 
 ## Launchers
 
@@ -317,10 +360,10 @@ judge whether a cheaper or more expensive model will be good enough for your wor
 
 ## Ongoing Usage
 
-One command moves your configuration between machines. Synced: `global/settings.json`, skills
-(all three sets), agents (both formats), the statusline, both shell-function files, both
-`CLAUDE.md` files and both generated `AGENTS.md` files, the Codex profile, project-local
-settings, and workflow scripts. Not synced: the encrypted secrets and Codex machine state,
+One command moves your configuration between machines. Synced: `global/settings.json` and its
+`workflows-on.json` overlay, skills (all three sets), agents (both formats), the statusline,
+both shell-function files, both `CLAUDE.md` files and both generated `AGENTS.md` files, the
+Codex profile, project-local settings, and workflow scripts. Not synced: the encrypted secrets and Codex machine state,
 which are per-machine by construction, and your PowerShell profile — the functions live in
 their own files that the profile sources, so nothing else in the profile is touched.
 
@@ -332,7 +375,7 @@ Use the `/sync-config` slash command:
 ### From PowerShell
 
 ```powershell
-cd "$env:USERPROFILE\Desktop\claude-config"
+cd (Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config')
 powershell -ExecutionPolicy Bypass -File sync-config.ps1 push   # collect, commit, push
 powershell -ExecutionPolicy Bypass -File sync-config.ps1 pull   # pull, deploy, verify
 ```
@@ -350,7 +393,7 @@ Push works because you forked; pushing to a repo you do not own does not. To tak
 changes from upstream:
 
 ```powershell
-git -C "$env:USERPROFILE\Desktop\claude-config" pull upstream main
+git -C (Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config') pull upstream main
 ```
 
 **Which copy do you edit?** For `installed` artifacts (almost everything): the deployed copy —
@@ -362,9 +405,10 @@ repo, and `deploy.ps1` is almost always the right answer.
 
 ### Optional: OpenRouter Key
 
-Only needed for OpenRouter mode. Store it similarly to the above GitHub token:
+Only needed for OpenRouter mode. Store it the same way as the GitHub token above:
 
 ```powershell
+cd (Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config')
 .\Set-Secret.ps1 -Name openrouter-key
 ```
 
@@ -390,17 +434,34 @@ One note (noted at the top of `claude-functions.ps1` as well): `claude-sp` uses
 ## Verifying and Recovering
 
 ```powershell
+cd (Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config')
 .\doctor.ps1
 ```
 
-`doctor.ps1` reports what is actually true on this machine: Claude Code, Node and Codex
-versions (the last against the `compat.json` floor), settings that parse, every artifact the repo ships
-present at *every* destination, every deployed file still *matching* the repo, the statusline
-actually executing, both PowerShell profiles wired, the repo pointers pointing home, the
-Codex profile loading, the generated files fresh and free of Claude-only vocabulary, no Codex
-machine state tracked, and secrets that actually decrypt. Each failure prints the command that
-fixes it, and the script exits non-zero if anything failed. `/sync-config pull` runs it
-automatically and passes its exit code through.
+`doctor.ps1` reports what is actually true on this machine:
+
+- Claude Code on PATH, and the Codex version against the `compat.json` floor. Node is only
+  reported, since only npm-installed tools such as Codex need it
+- Claude Code's settings files parsing as *strict* JSON: comments and trailing commas fail,
+  because Claude Code rejects them even where Windows Terminal's JSONC would not
+- every artifact the repo ships present at *every* destination — each skill, agent and
+  workflow, and each single file (settings, memory files, launchers, generated agents and
+  `AGENTS.md`) — and every deployed file still *matching* the repo
+- the statusline actually executing
+- both PowerShell profiles carrying the managed block with exactly the contents deploy writes,
+  and no launcher code or secret reads left *outside* it from an older setup
+- an execution policy that lets each wired profile run (the Process scope ignored, since it
+  describes how doctor was started, not the next terminal you open), and Windows Terminal's
+  default profile being one of those PowerShells
+- the repo pointers pointing home, the Codex profile loading, and the deployed `AGENTS.md`
+  reaching Codex's prompt input
+- the generated files fresh, and free of Claude-only vocabulary — including the slash
+  commands of Claude-only skills — and no Codex machine state tracked
+- secrets that actually decrypt, counting only those that apply: the GitHub token is not
+  asked for while its plugin is off
+
+Each failure prints the command that fixes it, and the script exits non-zero if anything
+failed. `/sync-config pull` runs it automatically and passes its exit code through.
 
 It exists because `deploy.ps1` can only report what it *wrote*, which can be entirely true
 while the outcome is still wrong — a file written perfectly to a location nothing reads is the
@@ -413,8 +474,9 @@ because either direction can be the right one: `collect.ps1` keeps the local ver
 `deploy.ps1` takes the repo's.
 
 A final section checks the content rather than the plumbing: that every skill declares a
-`description`, and that no synced markdown hardcodes a Desktop path. These are the kind of
-mistake every other check passes straight over. (`research-worker.md` used to be checked
+`description`, and that no synced markdown spells out a literal `Desktop\claude-config` or
+`Desktop\claude-scratch` path (either slash direction; other Desktop paths are not matched).
+These are the kind of mistake every other check passes straight over. (`research-worker.md` used to be checked
 here against `System Prompt.txt`, which it duplicated by hand; it is now generated from it,
 so the generated-file staleness check covers it.)
 
@@ -422,12 +484,14 @@ The unit tests cover the half of the engine doctor cannot: manifest validation, 
 filtering, divergence candidacy, token round trips, and the derived-instructions build:
 
 ```powershell
+cd (Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config')
 powershell -ExecutionPolicy Bypass -File tests\run-tests.ps1
 ```
 
 To see what a deploy would change without changing anything:
 
 ```powershell
+cd (Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config')
 .\deploy.ps1 -DryRun
 ```
 
@@ -435,6 +499,7 @@ It prints every write, deletion, adoption, profile edit and environment change, 
 none of them.
 
 ```powershell
+cd (Join-Path ([Environment]::GetFolderPath('Desktop')) 'claude-config')
 .\restore.ps1                 # list what can be restored
 .\restore.ps1 -Latest -DryRun # preview
 .\restore.ps1 -Latest         # put it back
@@ -536,8 +601,10 @@ system prompt behind a restricted tool list, with no MCP tools or skills.
 large schema out of context in ordinary sessions. The `/deep-research-tiered` skill turns it
 on, runs the workflow, and turns it back off; the setting hot-reloads on every request, so no
 restart is involved. To start a session with workflows already enabled instead, pass
-`--settings "$env:USERPROFILE\.claude\workflows-on.json"` — a one-key file that overrides
-nothing else.
+`--settings "$env:USERPROFILE\.claude\workflows-on.json"`. That one-key file
+(`{ "enableWorkflows": true }`, overriding nothing else) ships with the config: it lives in
+`global/` and deploys to `~/.claude/` like any other file, so every machine has it after a
+deploy or `/sync-config pull`.
 
 Because workflow scripts hold no machine-specific paths, they are copied verbatim (the
 username placeholder pass is a no-op on them).
@@ -549,8 +616,9 @@ To add a new **Claude skill**, create `global/skills/<name>/SKILL.md` (or drop i
 location *is* the membership decision. A new **agent**: a `.md` file in `global/agents/`, or
 a `.toml` in `codex/agents/` with `name`, `description` and `developer_instructions`. A new
 **workflow**: a `.js` file in `project-desktop/.claude/workflows/`. A new **secret**: a
-`{name, purpose}` entry in `secrets.json`; `deploy.ps1` and `doctor.ps1` then report on it
-automatically.
+`{name, purpose}` entry in `secrets.json` (plus `plugin`, naming an `enabledPlugins` key, if
+the secret is needed only while that plugin is on); `deploy.ps1` and `doctor.ps1` then report
+on it automatically.
 
 To sync something the repo does not already handle, add one artifact to
 `Get-ArtifactManifest` in `lib/Common.ps1` — `Files` for an individual file, `Dirs` for a
@@ -568,8 +636,9 @@ three.
 
 - **Both PowerShell editions are wired.** Windows PowerShell 5.1 and PowerShell 7 read
   different profile paths. `deploy.ps1` injects its managed block into both, so the functions
-  exist in whichever shell you open. `doctor.ps1` checks each one, and reports which shell
-  Windows Terminal opens by default.
+  exist in whichever shell you open. `doctor.ps1` checks each one, along with the execution
+  policy that decides whether it runs at all, and warns when Windows Terminal's default
+  profile is not one of them.
 - **Repo `.ps1` files are pure ASCII, on purpose.** Windows PowerShell 5.1 reads a BOM-less
   file as ANSI, so a stray em-dash decodes into a smart quote that PowerShell treats as a
   string delimiter — fatal inside a double-quoted string. `doctor.ps1` enforces it. Markdown

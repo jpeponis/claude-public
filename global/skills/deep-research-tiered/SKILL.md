@@ -43,13 +43,13 @@ sessions stay lean.
 | Scope | session | Decompose into search angles and key assertions |
 | Search | worker (`sonnet`) | One parallel WebSearch agent per angle |
 | Fetch | worker | URL-dedup, fetch top sources, extract falsifiable claims |
-| Verify | `haiku`, escalating to `sonnet` | Fast scan vote; doubtful or key claims get 2 diverse-lens votes, and 2 refutations kill a claim |
+| Verify | `haiku`, escalating to `sonnet` | Fast scan vote; doubtful or key claims get 2 diverse-lens votes, and 2 refutations kill a claim; agent failures are reported as `unverified`, never as refuted |
 | Synthesize | session | Merge duplicates, rank by confidence, cite sources |
 | Critique | session | Flag unconfirmed key assertions and coverage gaps |
 
 ## Alternative: skip the toggle entirely
 
-Launching a session with workflows already on avoids editing settings mid-session:
+Launching a session with workflows already on avoids editing settings mid-session. The file `~/.claude/workflows-on.json` ships with the config (installed by sync-config pull / `deploy.ps1`), so it is normally already present; if it is missing, run a pull or deploy rather than creating it by hand:
 
 ```powershell
 claude --settings "$env:USERPROFILE\.claude\workflows-on.json"

@@ -1,5 +1,5 @@
 # lib/Common.ps1 -- Shared helpers, dot-sourced by collect.ps1, deploy.ps1, doctor.ps1,
-# restore.ps1, publish.ps1 and apply-terminal-keybinding.ps1.
+# restore.ps1, publish.ps1, sync-config.ps1 and apply-terminal-keybinding.ps1.
 #
 # Dot-source with:  . (Join-Path $repoRoot "lib\Common.ps1")
 #
@@ -125,6 +125,11 @@ function Get-ArtifactManifest {
                Destinations = @("$ClaudeHome\CLAUDE.md");              CollectFrom = "$ClaudeHome\CLAUDE.md" }
             @{ Id = 'statusline';       Repo = 'global\statusline-command.ps1'; Authority = 'installed'
                Destinations = @("$ClaudeHome\statusline-command.ps1"); CollectFrom = "$ClaudeHome\statusline-command.ps1" }
+            # An overlay for 'claude --settings <this file>': turns the Workflow tool on for
+            # one session while settings.json keeps it off. The deep-research skill tells
+            # sessions to launch with it, so it has to exist on every machine.
+            @{ Id = 'workflows-on';     Repo = 'global\workflows-on.json';      Authority = 'installed'
+               Destinations = @("$ClaudeHome\workflows-on.json");      CollectFrom = "$ClaudeHome\workflows-on.json" }
             @{ Id = 'claude-functions'; Repo = 'powershell\claude-functions.ps1'; Authority = 'installed'
                Destinations = @("$ClaudeHome\claude-functions.ps1");   CollectFrom = "$ClaudeHome\claude-functions.ps1" }
             @{ Id = 'codex-functions';  Repo = 'powershell\codex-functions.ps1';  Authority = 'installed'
@@ -486,7 +491,8 @@ function Update-GeneratedArtifacts {
         # and that difference is git's business, not staleness.
         if (Test-Path $outPath) { $current = (Get-Content $outPath -Raw -Encoding UTF8).Replace("`r`n", "`n") }
 
-        if ($current -eq $built) {
+        # -ceq: plain -eq ignores case, so a case-only edit to a source never rebuilt.
+        if ($current -ceq $built) {
             $results += [pscustomobject]@{ Label = $a.Repo; State = 'current' }
         } elseif ($Check) {
             $results += [pscustomobject]@{ Label = $a.Repo; State = 'stale' }
@@ -524,7 +530,8 @@ function Get-PlanFiles {
 }
 
 # --- The machine-specific values the repo refuses to hardcode -----------------
-#   {{USERNAME}}     the Windows account name
+#   {{USERNAME}}     the Windows account name, as the profile segment of a path only
+#                    (C:\Users\{{USERNAME}}\...; see Get-UserPathPattern)
 #   {{DESKTOP}}      the real Desktop, forward-slashed (OneDrive-aware)
 #   {{CONFIG_ROOT}}  the absolute path of this repo, forward-slashed
 #
@@ -543,13 +550,59 @@ function Get-PlanFiles {
 # Claude reaches for: PowerShell accepts 'C:/Users/...' everywhere, and Git Bash reads
 # backslashes as escapes. global\settings.json already spelled its path this way.
 #
-# String.Replace, not -replace: the tokens' casing is fixed, and a regex replacement
-# would give special meaning to '$' in a username or a path.
+# String.Replace, not -replace, for the two path tokens: their casing is fixed, and a
+# regex replacement would give special meaning to '$' in a path. {{USERNAME}} goes
+# through the path-segment pattern instead, with '$' doubled for the same reason.
 function Expand-Tokens {
     param([string]$Text, [string]$UserName, [string]$ConfigRoot, [string]$Desktop)
-    return $Text.Replace('{{CONFIG_ROOT}}', $ConfigRoot).
-                 Replace('{{DESKTOP}}',     $Desktop).
-                 Replace('{{USERNAME}}',    $UserName)
+    $Text = $Text.Replace('{{CONFIG_ROOT}}', $ConfigRoot).
+                  Replace('{{DESKTOP}}',     $Desktop)
+    return [regex]::Replace($Text, (Get-UserPathPattern -Segment '{{USERNAME}}'), '${1}' + $UserName.Replace('$', '$$'))
+}
+
+# --- The account name, and only where it names a profile directory -------------
+# {{USERNAME}} stands for the path segment after a Users directory -- C:\Users\<name>\,
+# C:/Users/<name>/, JSON's C:\\Users\\<name>\\, git-bash /c/Users/<name>/ -- and for
+# nothing else. It used to stand for the account name ANYWHERE, case-insensitively, and
+# that rewrote identities rather than paths: a collect on an account named after its
+# owner turned the person's name in a skill into the token (commit 25a2702), and where
+# the account name is also the GitHub login every handle, clone URL and email address
+# was one collect away from the same fate. None of those is machine-specific; only the
+# profile directory is.
+#
+# The shape, case-insensitive: '<sep>Users<sep><name>', sep being \ or / or JSON's \\,
+# where <name> ends at a separator, a quote or backtick, whitespace, the end of the
+# text, or a character no Windows account name may contain. The Users segment must
+# follow a separator that is not itself part of a URL: 'gh api users/<login>' and
+# 'api.github.com/users/<login>' address GitHub, not a disk.
+#
+# Both directions use this one shape (ConvertTo-RepoTokens tokenizes it, Expand-Tokens
+# expands it), so a round trip is lossless: a {{USERNAME}} written in prose -- documenting
+# the token, say -- deploys as itself instead of as the local account name, which no later
+# collect could turn back.
+#
+# -Prefix drops the end condition, which makes it the LEAK pattern: 'C:\Users\<name>.CORP\'
+# is path-shaped and starts with the name, but is not a clean segment, so the tokenizer
+# leaves it alone and Assert-NoUserPath / collect's final sweep refuse it instead.
+function Get-UserPathPattern {
+    param([Parameter(Mandatory)][string]$Segment, [switch]$Prefix)
+    $sep  = '(?:\\{1,2}|/)'
+    $root = '(?<![\\/]|\.[^\\/\s"''`]*)' + $sep + 'users' + $sep
+    $end  = if ($Prefix) { '' } else { '(?=[\\/"''`\s\[\]:;|=,+*?<>@)]|$)' }
+    return '(?i)(' + $root + ')' + [regex]::Escape($Segment) + $end
+}
+
+# A path-shaped occurrence of the account name that tokenization did not take is a
+# hardcoded local path -- one machine's, and a leak of whatever the account is called.
+# collect runs this on every file it writes, after tokenizing, so it can only fire on a
+# near miss ('C:\Users\<name>.old\'), never on a path the tokenizer handled.
+function Assert-NoUserPath {
+    param([string]$Content, [Parameter(Mandatory)][string]$UserName, [string]$Label)
+    $m = [regex]::Match($Content, (Get-UserPathPattern -Segment $UserName -Prefix))
+    if ($m.Success) {
+        throw "$Label contains a local path collect cannot tokenize ('$($m.Value)'). " +
+              "Rewrite it with `$HOME, or spell the profile directory as C:\Users\<account>\."
+    }
 }
 
 # The reverse direction: machine paths -> tokens, used by collect.ps1. Lives here
@@ -561,12 +614,15 @@ function Expand-Tokens {
 # by hand types whatever their shell showed them. Tokenizing only one would leave the
 # other as a hardcoded local path -- the exact failure these tokens exist to prevent.
 # CONFIG_ROOT before DESKTOP, because the Desktop is a PREFIX of the config root;
-# the callers pass values in that order.
+# the callers pass values in that order. The account name last, and only as a path
+# segment (Get-UserPathPattern), matched case-insensitively because a path may spell
+# it differently than $env:USERNAME does.
 function ConvertTo-RepoTokens {
     param(
         [string]$Text,
         [Parameter(Mandatory)][string]$ConfigRoot,
-        [Parameter(Mandatory)][string]$Desktop
+        [Parameter(Mandatory)][string]$Desktop,
+        [string]$UserName
     )
     $replacements = @(
         @{ Token = '{{CONFIG_ROOT}}'; Value = $ConfigRoot }
@@ -575,6 +631,9 @@ function ConvertTo-RepoTokens {
     foreach ($r in $replacements) {
         $Text = $Text -replace [regex]::Escape($r.Value), $r.Token
         $Text = $Text -replace [regex]::Escape($r.Value.Replace('/', '\')), $r.Token
+    }
+    if ($UserName) {
+        $Text = [regex]::Replace($Text, (Get-UserPathPattern -Segment $UserName), '${1}{{USERNAME}}')
     }
     return $Text
 }
@@ -605,6 +664,50 @@ function Get-SecretsRegistry {
     $path = Join-Path $RepoRoot 'secrets.json'
     if (-not (Test-Path $path)) { return $null }
     return @((Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json).secrets)
+}
+
+# Whether a registry entry is expected on this machine at all. An entry with a 'plugin'
+# field serves one Claude Code plugin (an enabledPlugins key in the settings file) and
+# is only needed while that plugin is on: the GitHub token, while the GitHub plugin is
+# disabled, is a reminder about nothing. No 'plugin' field: always applies. Otherwise
+# only an explicit JSON true counts -- a missing or unreadable file, a missing key, or
+# any other value means the plugin is off.
+function Test-SecretApplies {
+    param([Parameter(Mandatory)]$Secret, [Parameter(Mandatory)][string]$SettingsPath)
+    $plugin = $Secret.plugin
+    if (-not $plugin) { return $true }
+    if (-not (Test-Path -LiteralPath $SettingsPath)) { return $false }
+    try { $settings = Read-TextFile $SettingsPath | ConvertFrom-Json } catch { return $false }
+    if ($null -eq $settings -or $null -eq $settings.enabledPlugins) { return $false }
+    $entry = $settings.enabledPlugins.PSObject.Properties[[string]$plugin]
+    return ($null -ne $entry -and $entry.Value -is [bool] -and $entry.Value)
+}
+
+# --- .last-deployed: the divergence guard's base -----------------------------
+# The commit this machine's installed tree reflects; collect.ps1 refuses to overwrite
+# repo changes that landed after it while the installed copy disagrees. Untracked and
+# meaningful only here. Two writers: deploy.ps1 after it installs a commit, and
+# sync-config.ps1 after a push's collect + commit, when the installed copies ARE the
+# new commit because collect just put them there. With deploy as the only writer, the
+# base stayed at the last deploy, so the next push diffed that old base against HEAD,
+# met the files this machine had itself committed since, and refused them as if
+# another machine had changed them. Returns $true when the file was written.
+function Set-LastDeployed {
+    param([Parameter(Mandatory)][string]$RepoRoot)
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        # Index, not '| Select-Object -First 1': that stops the pipeline early, which in
+        # 5.1 kills git and leaves $LASTEXITCODE at -1, so the file was written only
+        # when git happened to exit first.
+        $head = @(& git -C $RepoRoot rev-parse HEAD 2>$null)[0]
+        if ($LASTEXITCODE -eq 0 -and $head) {
+            Write-TextFile -Path (Join-Path $RepoRoot '.last-deployed') -Content ([string]$head).Trim()
+            return $true
+        }
+    } catch { }
+    finally { $ErrorActionPreference = $previousEap }
+    return $false
 }
 
 # --- .backups\ --------------------------------------------------------------
@@ -719,14 +822,16 @@ function Add-ClaudeProfileBlock {
 
     $m     = Get-ClaudeBlockMarkers
     $block = Get-ClaudeProfileBlock
-    $existing = if (Test-Path $Path) { Get-Content $Path -Raw -Encoding UTF8 } else { '' }
+    # Read-TextFile, not Get-Content -Raw: a 0-byte profile reads as $null there, and
+    # IsMatch($null) below throws, which took deploy down on any empty profile.
+    $existing = if (Test-Path $Path) { Read-TextFile $Path } else { '' }
 
     $rx = [regex]("(?s)" + $m.DetectPattern + ".*?" + [regex]::Escape($m.End))
     $hasBlock = $rx.IsMatch($existing)
 
     if ($hasBlock) {
         $updated = $rx.Replace($existing, $block, 1)
-        if ($updated -eq $existing) { return 'unchanged' }
+        if ($updated -ceq $existing) { return 'unchanged' }
         if ($DryRun) { return 'would-update' }
         $action = 'updated'
     } else {

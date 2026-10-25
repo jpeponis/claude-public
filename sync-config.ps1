@@ -5,8 +5,8 @@
 #   sync-config.ps1 push -DryRun          Collect local config, stage, show what would be committed
 #   sync-config.ps1 push                  Collect, stage, commit, and push to remote
 #
-# Designed to run from any machine. Username parameterization is handled by
-# collect.ps1 (local -> {{USERNAME}}) and deploy.ps1 ({{USERNAME}} -> local).
+# Designed to run from any machine. Path parameterization is handled by collect.ps1
+# (local -> {{USERNAME}} and friends) and deploy.ps1 ({{USERNAME}} -> local).
 
 param(
     [Parameter(Position = 0)]
@@ -18,6 +18,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $repoRoot "lib\Common.ps1")
 
 # Fail fast instead of hanging on an interactive credential/TTY prompt when run
 # non-interactively (e.g. from Claude Code). Credentials still come from Git
@@ -28,6 +29,16 @@ $env:GIT_TERMINAL_PROMPT = "0"
 if (-not (Test-Path (Join-Path $repoRoot ".git"))) {
     Write-Host "ERROR: $repoRoot is not a git repository." -ForegroundColor Red
     exit 1
+}
+
+# Record HEAD as the commit this machine's installed tree reflects (.last-deployed, the
+# base collect.ps1's divergence guard diffs from). A failure is not fatal -- the push
+# itself is unaffected -- but it is said, because the next push may then refuse files
+# this machine committed itself.
+function Update-GuardBase {
+    if (-not (Set-LastDeployed -RepoRoot $repoRoot)) {
+        Write-Host "[WARN] could not record HEAD in .last-deployed; if the next push refuses this machine's own edits, run deploy.ps1 once." -ForegroundColor Yellow
+    }
 }
 
 function Invoke-Pull {
@@ -68,6 +79,23 @@ function Invoke-Push {
 
     Write-Host "=== PUSH $(if ($DryRun) {'(dry run) '})===" -ForegroundColor Cyan
 
+    # Push only from main. Every git call below names 'origin main', and on any other
+    # branch -- or a detached HEAD -- 'git push origin main' pushes the local main ref,
+    # not the commit this run makes, then reports "Pushed successfully" over a push of
+    # nothing. Same stderr trap as below: relax the preference for exactly this call.
+    $branch = $null
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $branch = @(git -C $repoRoot symbolic-ref --short HEAD 2>$null)[0] }
+    catch { }
+    finally { $ErrorActionPreference = $previousEap }
+    if ($branch -cne 'main') {
+        $where = if ($branch) { "branch '$branch'" } else { 'a detached HEAD' }
+        Write-Host "ERROR: push works only from main, and the repo is on $where. Nothing was collected or pushed." -ForegroundColor Red
+        Write-Host "  Switch back first: git -C `"$repoRoot`" switch main" -ForegroundColor DarkGray
+        exit 1
+    }
+
     # Pull first to avoid conflicts
     Write-Host "Pulling latest before push..." -ForegroundColor White
     git -C $repoRoot pull origin main
@@ -96,6 +124,9 @@ function Invoke-Push {
     if (-not $status) {
         Write-Host ""
         Write-Host "Nothing to commit. Local config matches repo." -ForegroundColor Green
+        # The installed tree matches HEAD -- collect just proved it -- so HEAD is the
+        # divergence guard's new base, exactly as after a deploy (Set-LastDeployed).
+        if (-not $DryRun) { Update-GuardBase }
         # 'Nothing to commit' is not 'nothing to push': commits made by hand in the
         # repo (repo-authoritative artifacts, script changes) sit local until pushed,
         # and exiting here used to leave them behind while reporting green.
@@ -155,6 +186,12 @@ function Invoke-Push {
         Write-Host "ERROR: git commit failed." -ForegroundColor Red
         exit 1
     }
+
+    # The commit just made IS this machine's installed tree (collect wrote it from there),
+    # so it becomes the divergence guard's base -- before the push, because that holds
+    # whether or not the network push succeeds. Without this the base stayed at the last
+    # deploy, and the next push refused this machine's own committed edits.
+    Update-GuardBase
 
     git -C $repoRoot push origin main
     if ($LASTEXITCODE -ne 0) {

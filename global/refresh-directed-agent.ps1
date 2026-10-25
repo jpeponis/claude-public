@@ -44,7 +44,7 @@ try {
         foreach ($dest in @($a.Destinations)) {
             $current = $null
             if (Test-Path $dest) { $current = Get-Content $dest -Raw -Encoding UTF8 }
-            if ($current -ne $built) { Write-TextFile -Path $dest -Content $built }
+            if ($current -cne $built) { Write-TextFile -Path $dest -Content $built }
         }
     }
     exit 0
